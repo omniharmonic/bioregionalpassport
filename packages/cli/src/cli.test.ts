@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTestDb, type Db } from '@passport/db';
 import { boulderManifest } from '@passport/tenant-config';
-import { importOptional, parseDotEnv, run, type CliIo } from './index.js';
+import { importOptional, loadServiceDeps, parseDotEnv, run, type CliIo } from './index.js';
 
 let db: Db;
 let out: string[];
@@ -126,5 +126,15 @@ describe('verify output', () => {
     expect(await run(['bioregion', 'create', '--manifest', 'b.json'], io({ cwd: dir }))).toBe(1);
     expect(err.join('\n')).toMatch(/did:key:zA/);
     expect(await run(['bioregion', 'create', '--manifest', 'b.json', '--allow-downgrade'], io({ cwd: dir }))).toBe(0);
+  });
+});
+
+describe('loadServiceDeps', () => {
+  it('wires the installed service smoke hooks, including gateway.smokeTransfer', async () => {
+    const deps = await loadServiceDeps();
+    expect(typeof deps.seedRecords).toBe('function');
+    expect(typeof deps.appview?.smokeRecord).toBe('function');
+    expect(typeof deps.vta?.ceremonyBackHalf).toBe('function');
+    expect(typeof deps.gateway?.smokeTransfer).toBe('function');
   });
 });

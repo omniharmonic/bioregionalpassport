@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@passport/appview": "workspace:*",
+    "@passport/cc-gateway": "workspace:*",
     "@passport/control-plane": "workspace:*",
     "@passport/credential-core": "workspace:*",
     "@passport/db": "workspace:*",

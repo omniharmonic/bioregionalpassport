@@ -73,7 +73,7 @@ export async function loadServiceDeps(): Promise<ProvisionDeps & VerifyDeps> {
     ...(typeof appview?.seedDemoRecords === 'function' ? { seedRecords: appview.seedDemoRecords } : {}),
     ...(appview ? { appview } : {}),
     ...(vta ? { vta } : {}),
-    ...(gateway ? { gateway } : {}),
+    ...(typeof gateway?.smokeTransfer === 'function' ? { gateway: { smokeTransfer: gateway.smokeTransfer } } : {}),
   };
 }
 

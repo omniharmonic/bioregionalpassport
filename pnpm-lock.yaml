@@ -123,6 +123,9 @@ importers:
       '@passport/appview':
         specifier: workspace:*
         version: link:../../services/appview
+      '@passport/cc-gateway':
+        specifier: workspace:*
+        version: link:../../services/cc-gateway
       '@passport/control-plane':
         specifier: workspace:*
         version: link:../../services/control-plane

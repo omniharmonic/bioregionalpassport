@@ -84,6 +84,7 @@ function wrap(sql: any, inTransaction: boolean): Db {
 /** Creates a `Db` backed by postgres.js against a live Postgres/Neon instance. */
 export function createDb(url: string): Db {
   const sql = postgres(url, {
+    onnotice: () => {},
     types: {
       json: { to: 114, from: [114], serialize: serializeJson, parse: parseJson },
       jsonb: { to: 3802, from: [3802], serialize: serializeJson, parse: parseJson },
