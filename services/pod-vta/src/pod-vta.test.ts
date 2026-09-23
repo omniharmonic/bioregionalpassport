@@ -243,17 +243,39 @@ describe('pod VTA — ceremony back half', () => {
     expect((await verifyDocument(vwc as any, resolver)).ok).toBe(true);
   });
 
-  it('witnesses a relationship at most once per pod (same event or another event)', async () => {
+  it('witnesses a relationship at most once per pod; the same convener recovers the stored VWC', async () => {
+    // Same convener, same event (halves swapped): the original VWC comes back (lost-response recovery).
     const same = await call('POST', `/events/${event.id}/witness`, { session: stewardSession, body: { vrcA: edge.vrcB, vrcB: edge.vrcA, evidence: 'liveness' } });
-    expect(same.status).toBe(409);
-    expect(same.body.code).toBe('ALREADY_WITNESSED');
-    expect(same.body.message).toBe('This relationship has already been witnessed in this pod.');
+    expect(same.status).toBe(200);
+    expect(same.body.existing).toBe(true);
+    expect(digestMultibase(same.body.vwc)).toBe(digestMultibase(vwc));
+    // Same convener, another event: still the one stored VWC.
     const other = await newEvent(stewardSession);
     const again = await call('POST', `/events/${other.id}/witness`, { session: stewardSession, body: { vrcA: edge.vrcA, vrcB: edge.vrcB, evidence: 'same-event' } });
-    expect(again.status).toBe(409);
-    expect(again.body.code).toBe('ALREADY_WITNESSED');
+    expect(again.status).toBe(200);
+    expect(digestMultibase(again.body.vwc)).toBe(digestMultibase(vwc));
+    // Another convener, another event: refused.
+    const c2 = generateKeyPair();
+    await run((ctx) => bootstrapSteward(ctx, deps, c2.did));
+    const s2 = sessionOf(c2.did, 'T3');
+    const ev2 = await newEvent(s2);
+    const byOther = await call('POST', `/events/${ev2.id}/witness`, { session: s2, body: { vrcA: edge.vrcA, vrcB: edge.vrcB, evidence: 'same-event' } });
+    expect(byOther.status).toBe(409);
+    expect(byOther.body.code).toBe('ALREADY_WITNESSED');
+    expect(byOther.body.message).toBe('This relationship has already been witnessed in this pod.');
     const rows = await run((ctx) => ctx.db.query('SELECT count(*)::int AS n FROM witness_refs WHERE pair_digest = $1', [edge.edgeDigest]));
     expect(rows[0].n).toBe(1);
+  });
+
+  it('refuses a convener witnessing their own relationship (SELF_WITNESS)', async () => {
+    const friend = generateKeyPair();
+    const own = relationship(steward, friend);
+    const res = await call('POST', `/events/${event.id}/witness`, { session: stewardSession, body: { vrcA: own.vrcA, vrcB: own.vrcB, evidence: 'same-event' } });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SELF_WITNESS');
+    expect(res.body.message).toBe('A convener cannot witness their own relationship.');
+    const flipped = await call('POST', `/events/${event.id}/witness`, { session: stewardSession, body: { vrcA: own.vrcB, vrcB: own.vrcA, evidence: 'same-event' } });
+    expect(flipped.body.code).toBe('SELF_WITNESS');
   });
 
   it('refuses the VWC to three unrelated DIDs replaying it (EDGE_NOT_YOURS)', async () => {

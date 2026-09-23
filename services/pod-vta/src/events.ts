@@ -8,6 +8,14 @@ import { addDays, bad, isObject, json, toIso, toMs } from './util.js';
 export const WITNESS_VALIDITY_DAYS = 365;
 export const SMOKE_PREFIX = 'smoke-';
 
+/**
+ * VTA side table (pod schema) keeping each issued VWC so a convener whose response was lost can recover it.
+ * Created lazily like the trust index's tables; candidate for a pod migration.
+ */
+export async function ensureVtaTables(db: VtaContext['db']): Promise<void> {
+  await db.query('CREATE TABLE IF NOT EXISTS vta_witness_credentials (digest text PRIMARY KEY, vwc jsonb NOT NULL)');
+}
+
 const alreadyWitnessed = () => new ServiceError(409, 'ALREADY_WITNESSED', 'This relationship has already been witnessed in this pod.');
 
 /** An event that may witness: a real attestation event, or the provisioning smoke's own event. */
@@ -160,6 +168,23 @@ export async function getEvent(ctx: VtaContext, id: string): Promise<EventView> 
 }
 
 /**
+ * For an already-witnessed pair: the same convener gets the stored VWC back (lost-response recovery, marked
+ * `existing: true`); anyone else gets 409 `ALREADY_WITNESSED`. Returns undefined when the pair is new.
+ */
+async function existingWitness(ctx: VtaContext, pairDigest: string, convener: string): Promise<{ vwc: VerifiableCredential; existing: true } | undefined> {
+  const [ref] = await ctx.db.query<{ digest: string; convener_did: string | null }>(
+    'SELECT digest, convener_did FROM witness_refs WHERE pair_digest = $1',
+    [pairDigest],
+  );
+  if (!ref) return undefined;
+  if (ref.convener_did === convener) {
+    const [stored] = await ctx.db.query<{ vwc: unknown }>('SELECT vwc FROM vta_witness_credentials WHERE digest = $1', [ref.digest]);
+    if (stored) return { vwc: json<VerifiableCredential>(stored.vwc), existing: true };
+  }
+  throw alreadyWitnessed();
+}
+
+/**
  * Issues a witness credential (VWC, StatementCredential `dtg:witnessed`) for an edge at an attestation event.
  *
  * The witnessed edge is the VRC PAIR: the body carries both signed halves `{ vrcA, vrcB, evidence, subject? }`;
@@ -178,7 +203,7 @@ export async function witnessEdge(
   convener: string,
   eventId: string,
   body: unknown,
-): Promise<{ vwc: VerifiableCredential }> {
+): Promise<{ vwc: VerifiableCredential; existing?: true }> {
   if (!isObject(body)) throw bad('BAD_REQUEST', 'A witness request needs both relationship halves and evidence.');
   const { vrcA, vrcB, evidence, subject } = body;
   if (evidence !== 'same-event' && evidence !== 'liveness') throw bad('BAD_REQUEST', 'evidence must be same-event or liveness.');
@@ -194,8 +219,12 @@ export async function witnessEdge(
   const conveners = json<string[]>(row.conveners) ?? [];
   if (!conveners.includes(convener)) throw new ServiceError(403, 'NOT_CONVENER', 'Only a convener of this event can witness at it.');
   // A relationship is witnessed at most once per pod (else the index would count it as several edges/events).
-  const seen = await ctx.db.query('SELECT 1 FROM witness_refs WHERE pair_digest = $1', [pair.digest]);
-  if (seen.length) throw alreadyWitnessed();
+  if (edgeParties.includes(convener)) {
+    throw new ServiceError(403, 'SELF_WITNESS', 'A convener cannot witness their own relationship.');
+  }
+  await ensureVtaTables(ctx.db);
+  const recovered = await existingWitness(ctx, pair.digest, convener);
+  if (recovered) return recovered;
   const now = ctx.now();
   const t = now.getTime();
   if (t < toMs(row.starts_at) - WITNESS_EARLY_MS || t > toMs(row.ends_at) + WITNESS_LATE_MS) {
@@ -220,6 +249,14 @@ export async function witnessEdge(
      ON CONFLICT DO NOTHING RETURNING digest`,
     [digestMultibase(vwc), row.id, convener, now.toISOString(), pair.digest],
   );
-  if (!inserted.length) throw alreadyWitnessed();
+  if (!inserted.length) {
+    const again = await existingWitness(ctx, pair.digest, convener);
+    if (again) return again;
+    throw alreadyWitnessed();
+  }
+  await ctx.db.query('INSERT INTO vta_witness_credentials (digest, vwc) VALUES ($1, $2) ON CONFLICT DO NOTHING', [
+    digestMultibase(vwc),
+    JSON.stringify(vwc),
+  ]);
   return { vwc };
 }

@@ -166,7 +166,8 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       auth: 'authority:vwc:issue',
       handler: async (ctx, req) => {
         const s = need(ctx, req, 'vwc:issue');
-        return { status: 201, body: await witnessEdge(ctx, deps, s.subject, req.params['id'] ?? '', req.body) };
+        const out = await witnessEdge(ctx, deps, s.subject, req.params['id'] ?? '', req.body);
+        return { status: out.existing ? 200 : 201, body: out };
       },
     },
 

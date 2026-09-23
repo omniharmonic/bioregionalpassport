@@ -176,7 +176,10 @@ export async function ceremonyBackHalf(ctx: VtaContext, deps: CeremonyDeps, opts
     if (touched.length) {
       await ctx.db.query('DELETE FROM vac_issuance_log WHERE id > $1 AND subject_did = ANY($2::text[])', [firstNewVacId, touched]);
     }
-    if (createdVwcs.length) await ctx.db.query('DELETE FROM witness_refs WHERE digest = ANY($1::text[])', [createdVwcs]);
+    if (createdVwcs.length) {
+      await ctx.db.query('DELETE FROM witness_refs WHERE digest = ANY($1::text[])', [createdVwcs]);
+      await ctx.db.query('DELETE FROM vta_witness_credentials WHERE digest = ANY($1::text[])', [createdVwcs]);
+    }
     if (createdEvents.length) {
       await ctx.db.query('DELETE FROM witness_refs WHERE event_id = ANY($1::text[])', [createdEvents]);
       await ctx.db.query('DELETE FROM events WHERE id = ANY($1::text[])', [createdEvents]);
