@@ -1,6 +1,6 @@
 import { TIERS, type Tier } from '@passport/vocab';
 import { isEndorsementScope } from './scorer.js';
-import type { IndexContext, MemberAggregate, TrustGraph } from './types.js';
+import type { Endorsement, IndexContext, MemberAggregate, TrustGraph } from './types.js';
 
 const DAY_MS = 86_400_000;
 
@@ -12,6 +12,8 @@ export interface PostingRow {
   witnessed: boolean;
   weighted: boolean;
   created_at: Date | string;
+  /** Verified VEC issuer for evidence-backed endorsements; null otherwise. */
+  endorser_did: string | null;
   witness_ref: string | null;
   event_id: string | null;
   convener_did: string | null;
@@ -20,7 +22,7 @@ export interface PostingRow {
 export async function loadPostings(ctx: IndexContext): Promise<PostingRow[]> {
   return ctx.db.query<PostingRow>(
     `SELECT p.poster_did, c.commitment, c.scope, p.witnessed, p.weighted, p.created_at,
-            c.witness_ref, w.event_id, w.convener_did
+            p.endorser_did, c.witness_ref, w.event_id, w.convener_did
        FROM index_postings p
        JOIN edge_commitments c ON c.commitment = p.commitment
        LEFT JOIN witness_refs w ON w.digest = c.witness_ref
@@ -77,6 +79,9 @@ export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph;
     m.recordedTier = asTier(row.tier);
   }
 
+  // At most one endorsement per (endorser, poster): postings are ordered by
+  // created_at, so a later VEC from the same endorser replaces the earlier one.
+  const byEndorser = new Map<string, Map<string, Endorsement>>();
   for (const p of postings) {
     const m = ensure(p.poster_did);
     if (p.witnessed && p.witness_ref) {
@@ -85,13 +90,21 @@ export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph;
       if (p.event_id) sets.events.add(p.event_id);
       if (p.convener_did) sets.conveners.add(p.convener_did);
     } else if (isEndorsementScope(p.scope)) {
-      m.endorsements.push({
+      const endorsement: Endorsement = {
         scope: p.scope,
         ageDays: Math.max(0, (now - toDate(p.created_at).getTime()) / DAY_MS),
         weighted: p.weighted,
-      });
+      };
+      if (p.endorser_did) {
+        let perPoster = byEndorser.get(p.poster_did);
+        if (!perPoster) byEndorser.set(p.poster_did, (perPoster = new Map()));
+        perPoster.set(p.endorser_did, endorsement);
+      } else {
+        m.endorsements.push(endorsement);
+      }
     }
   }
+  for (const [did, perPoster] of byEndorser) members.get(did)!.endorsements.push(...perPoster.values());
   for (const [did, sets] of witnessSets) {
     const m = members.get(did)!;
     m.witnessedEdges = sets.refs.size;

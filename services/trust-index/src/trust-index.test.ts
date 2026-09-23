@@ -29,11 +29,14 @@ const SEED = SEED_KEY.did;
 const E1 = persona('e1');
 const E2 = persona('e2');
 
-/** A signed `dtg:endorses` VEC from `issuer` to `subject`. */
-function vec(issuer: KeyPair, subject: string, scope: 'lives-here' | 'worked-with' | 'knows' = 'knows') {
-  return signDocument(buildEndorsement({ issuer: issuer.did, subject, scope, validFrom: '2026-01-01T00:00:00Z' }), issuer, {
-    created: '2026-01-01T00:00:00Z',
-  });
+/** A signed `dtg:endorses` VEC from `issuer` to `subject` (vary `created` for a distinct credential). */
+function vec(
+  issuer: KeyPair,
+  subject: string,
+  scope: 'lives-here' | 'worked-with' | 'knows' = 'knows',
+  created = '2026-01-01T00:00:00Z',
+) {
+  return signDocument(buildEndorsement({ issuer: issuer.did, subject, scope, validFrom: created }), issuer, { created });
 }
 const NOW = new Date('2026-09-22T12:00:00Z');
 
@@ -397,6 +400,56 @@ describe('endorsement evidence (VEC)', () => {
     const r2 = await commitWith(pod, M.did, { vec: vec(t1, M.did) }, 'vec-commit-cccccccc');
     expect(r2.items[0]).toMatchObject({ weighted: false, linked: false });
     expect(await links(pod)).toEqual([]);
+  });
+
+  it('replaying the same VEC on a second commitment → 400 DUPLICATE_EVIDENCE (same request or later)', async () => {
+    const pod = await newPod();
+    await pod.member(E1.did, 'T2');
+    await pod.member(M.did, 'T1');
+    const v = vec(E1, M.did);
+    await expect(
+      pod.run((ctx) =>
+        commitEdges(
+          ctx,
+          M.did,
+          {
+            commitments: [
+              { commitment: 'replay-a-aaaaaaaa', scope: 'knows', evidence: { vec: v } },
+              { commitment: 'replay-b-aaaaaaaa', scope: 'knows', evidence: { vec: v } },
+            ],
+          },
+          { resolver },
+        ),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: 'DUPLICATE_EVIDENCE', message: 'This endorsement has already been counted.' });
+
+    await commitWith(pod, M.did, { vec: v }, 'replay-a-aaaaaaaa');
+    await expect(commitWith(pod, M.did, { vec: v }, 'replay-c-aaaaaaaa')).rejects.toMatchObject({
+      status: 400,
+      code: 'DUPLICATE_EVIDENCE',
+    });
+    // an identical retry of the same (commitment, VEC) is idempotent, not a replay
+    const retry = await commitWith(pod, M.did, { vec: v }, 'replay-a-aaaaaaaa');
+    expect(retry.items[0]).toMatchObject({ status: 'duplicate', weighted: true });
+    expect((await pod.run((ctx) => recommendTier(ctx, M.did))).metrics.weightedEndorsements).toBe(1);
+  });
+
+  it('two different VECs from the same issuer count once; two issuers count twice', async () => {
+    const pod = await newPod();
+    await pod.member(E1.did, 'T2');
+    await pod.member(E2.did, 'T2');
+    await pod.member(M.did, 'T1');
+    await commitWith(pod, M.did, { vec: vec(E1, M.did, 'knows', '2026-01-01T00:00:00Z') }, 'same-issuer-1-aaaa');
+    await commitWith(pod, M.did, { vec: vec(E1, M.did, 'knows', '2026-02-01T00:00:00Z') }, 'same-issuer-2-aaaa');
+    const once = await pod.run((ctx) => recommendTier(ctx, M.did));
+    expect(once.metrics.weightedEndorsements).toBe(1);
+    expect(once.metrics.endorsements).toBe(1);
+    expect(once.metrics.endorsementSum).toBeCloseTo(0.5, 10); // one fresh `knows`
+
+    await commitWith(pod, M.did, { vec: vec(E2, M.did, 'knows') }, 'other-issuer-aaaaa');
+    const twice = await pod.run((ctx) => recommendTier(ctx, M.did));
+    expect(twice.metrics.weightedEndorsements).toBe(2);
+    expect(twice.metrics.endorsementSum).toBeCloseTo(1.0, 10);
   });
 
   it('evidence must match the commitment scope and cannot be self-issued', async () => {

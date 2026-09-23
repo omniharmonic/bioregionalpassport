@@ -1,4 +1,4 @@
-import { createResolver, verifyDocument, type DidResolver, type VerifiableCredential } from '@passport/credential-core';
+import { createResolver, digestMultibase, verifyDocument, type DidResolver, type VerifiableCredential } from '@passport/credential-core';
 import { IndexCommitmentSchema } from '@passport/lexicons';
 import { ServiceError } from '@passport/service-kit';
 import { isAtLeast, PREDICATES, TIERS, type Tier } from '@passport/vocab';
@@ -57,6 +57,10 @@ function asTier(value: unknown): Tier | null {
   return typeof value === 'string' && (TIERS as readonly string[]).includes(value) ? (value as Tier) : null;
 }
 
+function duplicateEvidence(): ServiceError {
+  return new ServiceError(400, 'DUPLICATE_EVIDENCE', 'This endorsement has already been counted.');
+}
+
 function badEvidence(message: string, hint?: string): ServiceError {
   return new ServiceError(400, 'BAD_EVIDENCE', message, hint);
 }
@@ -109,6 +113,10 @@ async function verifyEndorsementEvidence(
  *   documented MVP privacy deviation: beyond salted commitments, the index holds
  *   two directed DIDs per opted-in weighted endorsement.
  *
+ * - Each VEC counts once per poster: its `digestMultibase` is stored as
+ *   `evidence_digest` (unique per poster); reusing it on another commitment is
+ *   refused with 400 `DUPLICATE_EVIDENCE`.
+ *
  * Invalid evidence rejects the whole request (400 `BAD_EVIDENCE`).
  */
 export async function commitEdges(
@@ -131,12 +139,25 @@ export async function commitEdges(
   const resolver = deps.resolver ?? createResolver();
 
   // Verify all evidence up front so a bad credential rejects the request before anything is written.
+  // Each VEC is bound to one posting per poster (evidence_digest); replays are refused.
   const issuers = new Map<number, string>();
+  const digests = new Map<number, string>();
+  const seenInRequest = new Set<string>();
   for (const [i, item] of parsed.data.commitments.entries()) {
     if (!item.evidence) continue;
     if (!isEndorsementScope(item.scope)) throw badEvidence('Endorsement evidence can only accompany an endorsement scope.');
     if (item.witnessRef) throw badEvidence('An endorsement commitment cannot also carry a witness reference.');
     issuers.set(i, await verifyEndorsementEvidence(item.evidence.vec, poster, item.scope, now, resolver));
+    const digest = digestMultibase(item.evidence.vec);
+    if (seenInRequest.has(digest)) throw duplicateEvidence();
+    seenInRequest.add(digest);
+    const prior = await ctx.db.query<{ commitment: string }>(
+      'SELECT commitment FROM index_postings WHERE poster_did = $1 AND evidence_digest = $2',
+      [poster, digest],
+    );
+    // Re-posting the very same (commitment, VEC) is an idempotent retry; any other reuse is a replay.
+    if (prior[0] && prior[0].commitment !== item.commitment) throw duplicateEvidence();
+    digests.set(i, digest);
   }
 
   const items: CommitItemResult[] = [];
@@ -208,11 +229,11 @@ export async function commitEdges(
     }
 
     const inserted = await ctx.db.query(
-      `INSERT INTO index_postings (commitment, poster_did, witnessed, weighted, created_at)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO index_postings (commitment, poster_did, witnessed, weighted, created_at, evidence_digest, endorser_did)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (commitment, poster_did) DO NOTHING
        RETURNING commitment`,
-      [item.commitment, poster, claimsWitness, weighted, now],
+      [item.commitment, poster, claimsWitness, weighted, now, digests.get(i) ?? null, issuer ?? null],
     );
     if (inserted.length === 0) {
       result.status = 'duplicate';
