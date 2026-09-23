@@ -1,0 +1,104 @@
+/* ui-kit's theme.css brings in Tailwind v4 and maps --bp-* tokens to utilities. */
+@import "@passport/ui-kit/theme.css";
+@source "../../../packages/ui-kit/src";
+
+/* Platform defaults (the pod layout overrides these through ThemeProvider). */
+:root {
+  --bp-primary: #1f5f4a;
+  --bp-accent: #c98a1b;
+  --bp-bg: #fbf8f2;
+  --bp-fg: #17201c;
+  --bp-font-display: var(--font-fraunces), ui-serif, Georgia, serif;
+  --bp-font-body: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  color-scheme: light;
+}
+
+/* Derived tokens are declared on every themed root so they follow the pod's colours. */
+:root,
+.bp-theme {
+  --bp-muted: color-mix(in srgb, var(--bp-fg) 68%, var(--bp-bg));
+  --bp-rule: color-mix(in srgb, var(--bp-fg) 14%, var(--bp-bg));
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bp-bg);
+  color: var(--bp-fg);
+  font-family: var(--bp-font-body);
+  line-height: 1.6;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+.font-display {
+  font-family: var(--bp-font-display);
+  font-optical-sizing: auto;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+a {
+  color: var(--bp-primary);
+  text-underline-offset: 0.2em;
+  text-decoration-thickness: 1px;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 3px solid var(--bp-primary);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.skip-link {
+  position: absolute;
+  left: 1rem;
+  top: -4rem;
+  z-index: 50;
+  padding: 0.5rem 1rem;
+  background: var(--bp-fg);
+  color: var(--bp-bg);
+  border-radius: 0.5rem;
+}
+
+.skip-link:focus {
+  top: 1rem;
+}
+
+.muted {
+  color: var(--bp-muted);
+}
+
+.rule {
+  border-color: var(--bp-rule);
+}
+
+.eyebrow {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--bp-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

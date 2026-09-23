@@ -1,0 +1,41 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "next typegen && tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@passport/appview": "workspace:*",
+    "@passport/control-plane": "workspace:*",
+    "@passport/credential-core": "workspace:*",
+    "@passport/db": "workspace:*",
+    "@passport/pod-vta": "workspace:*",
+    "@passport/service-kit": "workspace:*",
+    "@passport/tenant-config": "workspace:*",
+    "@passport/trust-index": "workspace:*",
+    "@passport/ui-kit": "workspace:*",
+    "@passport/verifier-sdk": "workspace:*",
+    "@passport/vocab": "workspace:*",
+    "next": "^16.3.6",
+    "postgres": "^3.4.9",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.7.0",
+    "vitest": "^5.0.1"
+  }
+}
