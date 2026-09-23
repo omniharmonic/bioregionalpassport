@@ -8,11 +8,11 @@ import { currentPodBase } from '@/lib/podRequest';
 export const dynamic = 'force-dynamic';
 
 /**
- * Placeholder for pod sections whose pages land in later tasks (map, directory,
- * grants). A static route folder such as `app/p/[slug]/grants`
- * takes precedence over this dynamic segment, so later tasks need no change here.
+ * Placeholder for pod sections that have no page of their own yet. Map, directory, events and grants now
+ * have static route folders (`app/p/[slug]/map` etc.), which take precedence over this dynamic segment; the
+ * set is empty, so any other section is a 404. A future section can be listed here until its page lands.
  */
-const SECTIONS = new Set(['map', 'directory', 'grants']);
+const SECTIONS = new Set<string>([]);
 
 export async function generateMetadata({ params }: PageProps<'/p/[slug]/[section]'>): Promise<Metadata> {
   const { section } = await params;
