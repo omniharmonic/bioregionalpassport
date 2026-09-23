@@ -1,6 +1,6 @@
 import type { TrustPolicy } from '@passport/tenant-config';
 import { loadGraph, toDate, type PostingRow } from './graph.js';
-import { witnessPairsPerWeek } from './requirements.js';
+import { hubMinAdmits, witnessPairsPerWeek } from './requirements.js';
 import { isEndorsementScope } from './scorer.js';
 import type { IndexContext, TrustGraph } from './types.js';
 
@@ -19,7 +19,10 @@ export interface WitnessRow {
   vwc: unknown;
 }
 
-/** Hub flag: a witness with at least this many admitted members, none of them witnessed by anyone else. */
+/**
+ * Default hub threshold: a witness with at least this many admitted members, none of them witnessed by anyone
+ * else. The pod policy overrides it with `anomaly.hubMinAdmits`.
+ */
 export const WITNESS_HUB_MIN_ADMITTED = 5;
 
 /** Reads `witness_refs` directly (the index does not import pod-vta). */
@@ -121,13 +124,14 @@ function edgeParties(vwc: unknown): string[] {
  *
  * - Volume: a witness who witnessed more than `policy.anomaly.witnessPairsPerWeek` (default 20) pairs in the
  *   last 7 days, counting pairs at events and at meetings.
- * - Hub: a witness with at least five members admitted with their witness credentials (`witness_refs.used_by`)
+ * - Hub: a witness with at least `policy.anomaly.hubMinAdmits` (default 5) members admitted with their witness credentials (`witness_refs.used_by`)
  *   where none of those members has been witnessed by anyone else (as an admitted DID or an edge party of
  *   another witness's pair).
  */
 export function witnessVolumeFlags(witnesses: readonly WitnessRow[], policy: TrustPolicy, now: Date): AnomalyFlag[] {
   const flags: AnomalyFlag[] = [];
   const limit = witnessPairsPerWeek(policy);
+  const hubMin = hubMinAdmits(policy);
   const windowStart = now.getTime() - 7 * DAY_MS;
 
   const recent = new Map<string, { times: Date[]; meetings: number }>();
@@ -171,7 +175,7 @@ export function witnessVolumeFlags(witnesses: readonly WitnessRow[], policy: Tru
   }
 
   for (const [witness, { dids, times }] of admittedBy) {
-    if (dids.size < WITNESS_HUB_MIN_ADMITTED) continue;
+    if (dids.size < hubMin) continue;
     const exclusive = [...dids].every((did) => [...(witnessedBy.get(did) ?? [])].every((other) => other === witness));
     if (exclusive) {
       flags.push({

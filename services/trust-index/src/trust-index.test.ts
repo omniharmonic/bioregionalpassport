@@ -39,6 +39,11 @@ function vec(
   return signDocument(buildEndorsement({ issuer: issuer.did, subject, scope, validFrom: created }), issuer, { created });
 }
 const NOW = new Date('2026-09-22T12:00:00Z');
+/**
+ * The T2 requirement list written by pods created before peer witnessing (`distinctEvents>=2`). Tests that exercise
+ * the compatibility rule set it explicitly so they do not depend on the current default policy text.
+ */
+const LEGACY_T2 = ['witnessedEdges>=3', 'distinctEvents>=2', 'weightedEndorsements>=2', 'seedHops<=3', 'spread>=0.5'];
 
 let db: Db;
 let podCounter = 0;
@@ -145,6 +150,7 @@ async function trustedScenario(hops: number): Promise<{ pod: Pod; m: string }> {
 describe('trust index on PGlite', () => {
   it('a member with 1 witnessed edge is T1', async () => {
     const pod = await newPod();
+    pod.policy.tiers.T2.requires = [...LEGACY_T2];
     await pod.member(SEED, 'T4');
     await pod.member('did:key:zA', 'T1');
     await pod.witness('wa', 'event-1', 'did:key:zC1', ['did:key:zA', 'did:key:zB']);
@@ -639,6 +645,7 @@ describe('peer witnessing (meetings, Task 21b)', () => {
       ['meet-2', 'meeting', W],
       ['meet-3', 'meeting', W],
     ]);
+    pod.policy.tiers.T2.requires = [...LEGACY_T2];
     const rec = await pod.run((ctx) => recommendTier(ctx, m));
     expect(rec.metrics).toMatchObject({
       witnessedEdges: 3,
@@ -685,6 +692,7 @@ describe('peer witnessing (meetings, Task 21b)', () => {
 
   it('with admission.peerWitnessing false, distinctEvents>=2 is strict: meetings do not pass, two real events do', async () => {
     const strict = (pod: Pod) => {
+      pod.policy.tiers.T2.requires = [...LEGACY_T2];
       (pod.policy as unknown as { admission: { peerWitnessing: boolean } }).admission = { peerWitnessing: false };
     };
     const peers = await peerScenario([
@@ -771,5 +779,23 @@ describe('peer witnessing (meetings, Task 21b)', () => {
       },
     ]);
     expect(await pod.run((ctx) => ctx.db.query('SELECT count(*)::int AS n FROM members'))).toEqual([{ n: 0 }]);
+  });
+
+  it('hub threshold is policy: anomaly.hubMinAdmits 3 flags 3 exclusive admits, not 2', async () => {
+    const pod = await newPod();
+    (pod.policy.anomaly as { hubMinAdmits?: number }).hubMinAdmits = 3;
+    const three = 'did:key:zThreeWitness';
+    const two = 'did:key:zTwoWitness';
+    const at = new Date(NOW.getTime() - 30 * 86_400_000);
+    for (let i = 0; i < 3; i++) await pair(pod, `three-${i}`, three, [`did:key:zT${i}`, `did:key:zTs${i}`], at, [`did:key:zT${i}`]);
+    for (let i = 0; i < 2; i++) await pair(pod, `two-${i}`, two, [`did:key:zW${i}`, `did:key:zWs${i}`], at, [`did:key:zW${i}`]);
+    expect(await pod.run((ctx) => stewardFlags(ctx))).toEqual([
+      {
+        did: three,
+        kind: 'witness-volume',
+        detail: "All 3 members admitted with this witness's credentials have been witnessed by no one else.",
+        since: at.toISOString(),
+      },
+    ]);
   });
 });

@@ -35,6 +35,8 @@ export {
   peerWitnessingEnabled,
   witnessPairsPerWeek,
   DEFAULT_WITNESS_PAIRS_PER_WEEK,
+  hubMinAdmits,
+  DEFAULT_HUB_MIN_ADMITS,
 } from './requirements.js';
 export type { ParsedRequirement, ComparisonOp } from './requirements.js';
 export { CommitBodySchema, COMMIT_SCOPES, MAX_WITNESS_CLAIMANTS, commitEdges, markWeighted } from './commit.js';

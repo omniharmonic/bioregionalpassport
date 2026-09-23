@@ -51,10 +51,11 @@ function compare(actual: number, op: ComparisonOp, value: number): boolean {
  * explicit). Read defensively: an older policy without them gets the defaults.
  *   admission.peerWitnessing      boolean, default true  — see `effectiveRequirement`
  *   anomaly.witnessPairsPerWeek   number,  default 20    — see flags.ts `witness-volume`
+ *   anomaly.hubMinAdmits          number,  default 5     — see flags.ts `witness-volume` (hub)
  */
 interface PeerWitnessingPolicyFields {
   admission?: { peerWitnessing?: boolean };
-  anomaly?: { witnessPairsPerWeek?: number };
+  anomaly?: { witnessPairsPerWeek?: number; hubMinAdmits?: number };
 }
 
 /** `policy.admission?.peerWitnessing !== false` (default true). */
@@ -67,6 +68,13 @@ export const DEFAULT_WITNESS_PAIRS_PER_WEEK = 20;
 export function witnessPairsPerWeek(policy: TrustPolicy): number {
   const v = (policy as unknown as PeerWitnessingPolicyFields).anomaly?.witnessPairsPerWeek;
   return typeof v === 'number' && Number.isFinite(v) ? v : DEFAULT_WITNESS_PAIRS_PER_WEEK;
+}
+
+/** `policy.anomaly?.hubMinAdmits ?? 5`. */
+export const DEFAULT_HUB_MIN_ADMITS = 5;
+export function hubMinAdmits(policy: TrustPolicy): number {
+  const v = (policy as unknown as PeerWitnessingPolicyFields).anomaly?.hubMinAdmits;
+  return typeof v === 'number' && Number.isFinite(v) ? v : DEFAULT_HUB_MIN_ADMITS;
 }
 
 /**
