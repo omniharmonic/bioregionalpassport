@@ -21,9 +21,11 @@ export default async function CirculationPage({ params }: PageProps<'/p/[slug]/c
         subtitle={`Local credit in ${name}: what neighbors owe one another, kept in one shared ledger.`}
         actions={
           <div className="flex flex-wrap gap-3">
-            <Button href={`${base}/merchant`} variant="secondary" size="sm">
-              {isMerchant ? 'Merchant Mode' : 'Accept credits at your enterprise'}
-            </Button>
+            {pod.manifest.modules.merchant ? (
+              <Button href={`${base}/merchant`} variant="secondary" size="sm">
+                {isMerchant ? 'Merchant Mode' : 'Accept credits at your enterprise'}
+              </Button>
+            ) : null}
             {isSteward ? (
               <Button href={`${base}/circulation/steward`} variant="secondary" size="sm">
                 Steward console
@@ -41,7 +43,7 @@ export default async function CirculationPage({ params }: PageProps<'/p/[slug]/c
       </Explain>
 
       {session ? (
-        <MemberAccount slug={slug} unit={unit} base={base} />
+        <MemberAccount slug={slug} podDid={pod.did} unit={unit} base={base} walletHref={walletHref} />
       ) : (
         <Notice kind="info">
           Present your passport to {name} to see your account. <a href={walletHref}>Open your passport</a>.

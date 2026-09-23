@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { notFound } from 'next/navigation';
 import { Explain, Notice, PageHeader } from '@passport/ui-kit';
 import { circulationPage } from '../circulation/_lib/pod';
 import { MerchantMode } from './_components/MerchantMode';
@@ -9,6 +10,7 @@ export const metadata: Metadata = { title: 'Merchant Mode' };
 export default async function MerchantPage({ params }: PageProps<'/p/[slug]/merchant'>) {
   const { slug } = await params;
   const { pod, base, session, unit, walletHref } = await circulationPage(slug);
+  if (!pod.manifest.modules.merchant) notFound();
   const name = pod.manifest.identity.name;
   // Enterprises this session may ring up for: `pay:receive@<enterpriseDid>` (owner's root authority or staff's).
   const receiveScopes = (session?.authorities ?? []).filter((a) => a.startsWith('pay:receive@')).map((a) => a.slice('pay:receive@'.length));
@@ -24,6 +26,8 @@ export default async function MerchantPage({ params }: PageProps<'/p/[slug]/merc
       {session ? (
         <MerchantMode
           slug={slug}
+          podDid={pod.did}
+          walletHref={walletHref}
           base={base}
           unit={unit}
           subject={session.subject}

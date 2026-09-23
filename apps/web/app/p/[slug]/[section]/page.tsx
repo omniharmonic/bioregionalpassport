@@ -9,10 +9,10 @@ export const dynamic = 'force-dynamic';
 
 /**
  * Placeholder for pod sections whose pages land in later tasks (map, directory,
- * grants, credits). A static route folder such as `app/p/[slug]/grants`
+ * grants). A static route folder such as `app/p/[slug]/grants`
  * takes precedence over this dynamic segment, so later tasks need no change here.
  */
-const SECTIONS = new Set(['map', 'directory', 'grants', 'credits']);
+const SECTIONS = new Set(['map', 'directory', 'grants']);
 
 export async function generateMetadata({ params }: PageProps<'/p/[slug]/[section]'>): Promise<Metadata> {
   const { section } = await params;

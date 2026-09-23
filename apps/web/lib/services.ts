@@ -3,6 +3,7 @@
  * Each `app/api/<service>/[[...path]]/route.ts` re-exports one of these.
  */
 import * as appview from '@passport/appview';
+import { smokeTransfer } from '@passport/cc-gateway';
 import { createControlRoutes, createRegistryRoutes, didDocumentFor, type PodSigner } from '@passport/control-plane';
 import { createResolver, type DidResolver } from '@passport/credential-core';
 import type { Db } from '@passport/db';
@@ -20,13 +21,12 @@ export const registryService = mountService(createRegistryRoutes() as MountableR
 /**
  * Operator control plane: provision / manifest / verify / export (no pod scope).
  * Same optional deps as the `passport` CLI: the AppView demo seeder on
- * provision, and the VTA/AppView smoke hooks for verify.
- * TODO(Task 14): add `gateway: @passport/cc-gateway` to verifyDeps once it lands.
+ * provision, and the VTA/AppView/gateway smoke hooks for verify.
  */
 export const controlService = mountService(
   createControlRoutes({
     provisionDeps: { seedRecords: appview.seedDemoRecords },
-    verifyDeps: { vta: podVta, appview },
+    verifyDeps: { vta: podVta, appview, gateway: { smokeTransfer } },
   }) as MountableRoute[],
   {
     base: '/api/control',
@@ -77,7 +77,7 @@ const vtaMounts = new Map<string, { signer: PodSigner; service: MountedService }
  * from the database (no HTTP round trip to ourselves); everything else via
  * the default did:web fetch and inline did:key.
  */
-function platformResolver(): DidResolver {
+export function platformResolver(): DidResolver {
   const { PLATFORM_DOMAIN } = env();
   const local = new RegExp(`^https://${PLATFORM_DOMAIN.replace(/\./g, '\\.')}/dids/([a-z0-9-]{2,40})/did\\.json$`);
   return createResolver({

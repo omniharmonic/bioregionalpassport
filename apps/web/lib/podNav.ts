@@ -25,7 +25,9 @@ export function podLinks(manifest: BioregionManifest, base: string): PodLink[] {
     { key: 'directory', label: 'Directory', href: `${base}/directory`, blurb: 'Local enterprises, groups and what they offer.' },
     { key: 'events', label: 'Events', href: `${base}/events`, blurb: 'Gatherings where neighbors meet and vouch.' },
     m.grants && { key: 'grants', label: copy(manifest, 'module.grants'), href: `${base}/grants`, blurb: 'Propose projects and vote on shared funds.' },
-    m.circulation && { key: 'credits', label: copy(manifest, 'module.circulation'), href: `${base}/credits`, blurb: 'Pay and earn in local credit.' },
+    m.circulation && { key: 'credits', label: copy(manifest, 'module.circulation'), href: `${base}/circulation`, blurb: 'Pay and earn in local credit.' },
+    m.circulation &&
+      m.merchant && { key: 'merchant', label: 'Merchant Mode', href: `${base}/merchant`, blurb: 'Accept credits at your enterprise.' },
     { key: 'passport', label: 'Passport', href: `/wallet?pod=${encodeURIComponent(slug)}`, blurb: 'Your credentials, held on your own device.' },
     { key: 'governance', label: 'Governance', href: `${base}/governance`, blurb: 'Who stewards this pod, and by what rules.' },
   ];

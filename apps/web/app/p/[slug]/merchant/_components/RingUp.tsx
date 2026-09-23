@@ -27,12 +27,15 @@ export function RingUp({
   slug,
   unit,
   enterprise,
+  staffVac,
   onRungUp,
   onSettled,
 }: {
   slug: string;
   unit: string;
   enterprise: MyEnterprise;
+  /** Staff only: their passed-on authority for this enterprise (owners send none). */
+  staffVac?: Record<string, unknown> | undefined;
   onRungUp: (r: RungUp) => void;
   onSettled: () => void;
 }) {
@@ -95,7 +98,7 @@ export function RingUp({
     setBusy(true);
     const res = await api<PayRequest>(slug, gw('/pay/request'), {
       method: 'POST',
-      body: { enterpriseDid: enterprise.did, totalSale: { unit: 'USD', value: totalN }, creditValue: creditN },
+      body: { enterpriseDid: enterprise.did, totalSale: { unit: 'USD', value: totalN }, creditValue: creditN, ...(staffVac ? { staffVac } : {}) },
     });
     setBusy(false);
     if (!res.ok) return setError(res.message);
@@ -164,7 +167,7 @@ export function RingUp({
           <div className="grid gap-4">
             <h3 className="text-lg font-medium">Record tender</h3>
             <p className="text-sm muted">Note how the {formatDollars(due)} was paid so your books reconcile.</p>
-            <TenderForm slug={slug} transactionId={phase.req.transactionId} dollarsDue={due} />
+            <TenderForm slug={slug} transactionId={phase.req.transactionId} dollarsDue={due} staffVac={staffVac} />
           </div>
         </Card>
         <div>

@@ -9,7 +9,7 @@ import { api, gw, type MyEnterprise, type PendingTender } from '../../circulatio
 import { exposureBand, formatCredits, formatDollars } from '../../circulation/_lib/format';
 
 /** Exposure (balance against ceiling) and sales whose dollar leg is not yet recorded (`/reconcile/pending`). */
-export function ExposureTab({ slug, unit, enterprise }: { slug: string; unit: string; enterprise: MyEnterprise }) {
+export function ExposureTab({ slug, unit, enterprise, staffVac }: { slug: string; unit: string; enterprise: MyEnterprise; staffVac?: Record<string, unknown> | undefined }) {
   const [pending, setPending] = useState<PendingTender[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -77,7 +77,7 @@ export function ExposureTab({ slug, unit, enterprise }: { slug: string; unit: st
                   </div>
                   {open === p.transactionId ? (
                     <div className="mt-4">
-                      <TenderForm slug={slug} transactionId={p.transactionId} dollarsDue={p.dollarsDue ?? 0} onRecorded={() => void load()} />
+                      <TenderForm slug={slug} transactionId={p.transactionId} dollarsDue={p.dollarsDue ?? 0} staffVac={staffVac} onRecorded={() => void load()} />
                     </div>
                   ) : null}
                 </Card>

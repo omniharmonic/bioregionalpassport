@@ -5,6 +5,7 @@ import { Button, Card, Field, Input, Notice, Select, Textarea } from '@passport/
 import { copyText, downloadText, ErrorLine } from '../../circulation/_components/bits';
 import { api, gw } from '../../circulation/_lib/api';
 import { formatShare } from '../../circulation/_lib/format';
+import { getRootCredentials } from '../../circulation/_lib/walletCreds';
 import type { MerchantProps } from './MerchantMode';
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -19,7 +20,7 @@ interface Created {
 }
 
 /** "Register your enterprise" (`POST /api/gateway/merchant/enterprises`), then hand the owner their authority. */
-export function RegisterForm({ slug, defaultAcceptance, onDone, onCancel }: MerchantProps & { onDone: () => void; onCancel?: (() => void) | undefined }) {
+export function RegisterForm({ slug, podDid, walletHref, defaultAcceptance, onDone, onCancel }: MerchantProps & { onDone: () => void; onCancel?: (() => void) | undefined }) {
   const [name, setName] = useState('');
   const [categories, setCategories] = useState('');
   const [acceptance, setAcceptance] = useState<string>('retail');
@@ -30,6 +31,7 @@ export function RegisterForm({ slug, defaultAcceptance, onDone, onCancel }: Merc
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<Created | null>(null);
   const [copied, setCopied] = useState(false);
+  const [noPassport, setNoPassport] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -39,10 +41,15 @@ export function RegisterForm({ slug, defaultAcceptance, onDone, onCancel }: Merc
     if ((latN !== undefined && !Number.isFinite(latN)) || (lonN !== undefined && !Number.isFinite(lonN))) {
       return setError('Latitude and longitude must be numbers.');
     }
+    setNoPassport(false);
+    // The gateway checks `credit:account` against the owner's own pod-issued authority credentials.
+    const credentials = await getRootCredentials(podDid);
+    if (credentials.length === 0) return setNoPassport(true);
     setBusy(true);
     const res = await api<Created>(slug, gw('/merchant/enterprises'), {
       method: 'POST',
       body: {
+        credentials,
         name: name.trim(),
         categories: categories.split(',').map((c) => c.trim()).filter(Boolean),
         acceptanceCategory: acceptance,
@@ -134,6 +141,11 @@ export function RegisterForm({ slug, defaultAcceptance, onDone, onCancel }: Merc
           <Textarea id="ent-desc" rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
         <ErrorLine message={error} />
+        {noPassport ? (
+          <Notice kind="warning">
+            Open your passport to join this pod first. <a href={walletHref}>Open your passport</a>
+          </Notice>
+        ) : null}
         <div className="flex flex-wrap gap-3">
           <Button type="submit" disabled={busy || !name.trim() || !categories.trim()}>
             {busy ? 'Registering…' : 'Register'}

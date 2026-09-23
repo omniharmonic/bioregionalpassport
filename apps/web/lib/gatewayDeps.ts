@@ -6,50 +6,50 @@
  */
 import 'server-only';
 import { createGatewayRoutes } from '@passport/cc-gateway';
-import { didDocumentFor, type PodSigner } from '@passport/control-plane';
-import { createResolver, type DidResolver } from '@passport/credential-core';
+import type { PodSigner } from '@passport/control-plane';
+import { digestMultibase, type DidResolver } from '@passport/credential-core';
+import { withPod } from '@passport/db';
+import { VAC_STATUS_LIST, statusListCredential, statusListUrl } from '@passport/pod-vta';
 import { createPosAdapterRoutes } from '@passport/pos-adapter';
+import type { StatusFetch } from '@passport/verifier-sdk';
 import { db } from './db';
 import { env } from './env';
 import { MountError, errorToResponse, mountService, type MountableRoute, type MountedService, type MountOptions } from './mount';
-import { findPod, loadPodSigner } from './pod';
+import { findPod, loadPodSigner, type LoadedPod } from './pod';
+import { platformResolver } from './services';
 import { resolveSlug } from './tenant';
 
-/**
- * DID resolver for presentations and signed messages, built the same way as the VTA's in `./services`: pod
- * DIDs hosted on this platform resolve from the database; everything else via did:web fetch and inline did:key.
- */
-function platformResolver(): DidResolver {
-  const { PLATFORM_DOMAIN } = env();
-  const local = new RegExp(`^https://${PLATFORM_DOMAIN.replace(/\./g, '\\.')}/dids/([a-z0-9-]{2,40})/did\\.json$`);
-  return createResolver({
-    webFetch: async (url) => {
-      const m = local.exec(url);
-      if (m?.[1]) {
-        const doc = await didDocumentFor(db(), m[1], PLATFORM_DOMAIN);
-        if (!doc) throw new Error(`No pod DID is hosted for ${m[1]}.`);
-        return doc;
-      }
-      const res = await fetch(url, { headers: { accept: 'application/did+json, application/json' } });
-      if (!res.ok) throw new Error(`Could not resolve ${url} (${res.status}).`);
-      return res.json();
-    },
-  });
-}
-
 let resolver: DidResolver | undefined;
+/** The platform DID resolver (pod DIDs from the database, did:web fetch, inline did:key), built once. */
 export function gatewayResolver(): DidResolver {
   resolver ??= platformResolver();
   return resolver;
 }
 
-/** The dependencies the gateway needs for one pod: `{ resolver, podSigner }`. */
-export async function gatewayDepsFor(slug: string): Promise<{ resolver: DidResolver; podSigner: PodSigner }> {
-  return { resolver: gatewayResolver(), podSigner: await loadPodSigner(slug) };
+type VtaCtx = Parameters<typeof statusListUrl>[0];
+
+/**
+ * Status-list fetcher for `/pay/authorize`: this pod's VAC revocation list, read straight from pod-vta (same
+ * approach as the round runtime) instead of an HTTP round trip to ourselves. Other lists are not trusted here.
+ */
+export function podStatusFetch(pod: LoadedPod, signer: PodSigner): StatusFetch {
+  const platformDomain = env().PLATFORM_DOMAIN;
+  return (url) =>
+    withPod(db(), pod.slug, async (tx) => {
+      const ctx = { slug: pod.slug, podDid: pod.did, db: tx, manifest: pod.manifest, policy: pod.policy, now: () => new Date(), platformDomain } as unknown as VtaCtx;
+      if (url !== statusListUrl(ctx)) throw new Error(`Unknown status list ${url}`);
+      return statusListCredential(ctx, { podSigner: signer }, VAC_STATUS_LIST);
+    });
+}
+
+/** The dependencies the gateway needs for one pod. */
+export async function gatewayDepsFor(pod: LoadedPod): Promise<{ resolver: DidResolver; podSigner: PodSigner; statusFetch: StatusFetch }> {
+  const podSigner = await loadPodSigner(pod.slug);
+  return { resolver: gatewayResolver(), podSigner, statusFetch: podStatusFetch(pod, podSigner) };
 }
 
 /** A pod-scoped mount whose route table is built from the pod's signer. */
-function perPodService(opts: MountOptions, build: (deps: { resolver: DidResolver; podSigner: PodSigner }) => MountableRoute[]): MountedService {
+function perPodService(opts: MountOptions, build: (deps: Awaited<ReturnType<typeof gatewayDepsFor>>) => MountableRoute[]): MountedService {
   const mounts = new Map<string, { signer: PodSigner; service: MountedService }>();
   const handle = async (req: Request): Promise<Response> => {
     const method = req.method.toUpperCase() as keyof MountedService;
@@ -64,7 +64,7 @@ function perPodService(opts: MountOptions, build: (deps: { resolver: DidResolver
       if (!pod.manifest.modules.circulation) {
         throw new MountError(404, 'MODULE_OFF', `${pod.manifest.identity.name} has not turned on local credits.`);
       }
-      const deps = await gatewayDepsFor(slug);
+      const deps = await gatewayDepsFor(pod);
       let hit = mounts.get(slug);
       if (!hit || hit.signer !== deps.podSigner) {
         hit = { signer: deps.podSigner, service: mountService(build(deps), opts) };
@@ -81,5 +81,8 @@ function perPodService(opts: MountOptions, build: (deps: { resolver: DidResolver
 /** Mutual-credit gateway (`/api/gateway`, pod scope). */
 export const gatewayService = perPodService({ base: '/api/gateway', scope: 'pod' }, (deps) => createGatewayRoutes(deps) as MountableRoute[]);
 
-/** POS adapter (`/api/pos`, pod scope), with the pod signer so tender write-back re-signs the receipt. */
-export const posService = perPodService({ base: '/api/pos', scope: 'pod' }, ({ podSigner }) => createPosAdapterRoutes({ podSigner }) as MountableRoute[]);
+/**
+ * POS adapter (`/api/pos`, pod scope), with the pod signer so tender write-back re-signs the receipt, and
+ * `digestMultibase` so staff can record tenders with their `staffVac`.
+ */
+export const posService = perPodService({ base: '/api/pos', scope: 'pod' }, ({ podSigner }) => createPosAdapterRoutes({ podSigner, digest: digestMultibase }) as MountableRoute[]);

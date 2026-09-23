@@ -14,7 +14,20 @@ const PROVIDERS = [
 ] as const;
 
 /** "Record tender": notes the dollar leg of a paid sale (`POST /api/gateway/pay/<id>/tender`). */
-export function TenderForm({ slug, transactionId, dollarsDue, onRecorded }: { slug: string; transactionId: string; dollarsDue: number; onRecorded?: () => void }) {
+export function TenderForm({
+  slug,
+  transactionId,
+  dollarsDue,
+  staffVac,
+  onRecorded,
+}: {
+  slug: string;
+  transactionId: string;
+  dollarsDue: number;
+  /** Staff only: their passed-on authority for the enterprise. */
+  staffVac?: Record<string, unknown> | undefined;
+  onRecorded?: () => void;
+}) {
   const id = useId();
   const [provider, setProvider] = useState<string>('manual');
   const [ref, setRef] = useState('');
@@ -34,7 +47,7 @@ export function TenderForm({ slug, transactionId, dollarsDue, onRecorded }: { sl
     setError(null);
     const res = await api<{ externalTender: { ref?: string } }>(slug, gw(`/pay/${encodeURIComponent(transactionId)}/tender`), {
       method: 'POST',
-      body: { provider, dollars: value, ...(ref.trim() ? { ref: ref.trim() } : {}) },
+      body: { provider, dollars: value, ...(ref.trim() ? { ref: ref.trim() } : {}), ...(staffVac ? { staffVac } : {}) },
     });
     setBusy(false);
     if (!res.ok) return setError(res.message);

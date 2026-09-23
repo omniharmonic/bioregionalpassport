@@ -1,10 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Card, EmptyState, Pill, Stat } from '@passport/ui-kit';
+import { Button, Card, EmptyState, Notice, Pill, Stat } from '@passport/ui-kit';
 import { LocalTime } from '@/components/LocalTime';
 import { api, enterpriseNames, gw, type AccountView, type DirectoryEntry, type StatementEntry } from '../_lib/api';
 import { abbreviateDid, formatCredits, formatDollars, formatShare, formatSignedCredits } from '../_lib/format';
+import { getRootCredentials } from '../_lib/walletCreds';
 import { ErrorLine, Loading } from './bits';
 
 type State =
@@ -14,11 +15,12 @@ type State =
   | { kind: 'ready'; account: AccountView; entries: StatementEntry[] };
 
 /** My account: balance/limit/available, open-account button, statement, and where credits are accepted. */
-export function MemberAccount({ slug, unit, base }: { slug: string; unit: string; base: string }) {
+export function MemberAccount({ slug, podDid, unit, base, walletHref }: { slug: string; podDid: string; unit: string; base: string; walletHref: string }) {
   const [state, setState] = useState<State>({ kind: 'loading' });
   const [directory, setDirectory] = useState<DirectoryEntry[] | null>(null);
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  const [noPassport, setNoPassport] = useState(false);
 
   const load = useCallback(async () => {
     const res = await api<{ account: AccountView; entries: StatementEntry[] }>(slug, gw('/accounts/me/statement'));
@@ -37,7 +39,16 @@ export function MemberAccount({ slug, unit, base }: { slug: string; unit: string
   async function openAccount() {
     setOpening(true);
     setOpenError(null);
-    const res = await api<{ account: AccountView }>(slug, gw('/accounts/open'), { method: 'POST' });
+    setNoPassport(false);
+    // The gateway reads `credit:account` and the limit band from the member's own pod-issued authority
+    // credentials, which live in the passport on this device.
+    const credentials = await getRootCredentials(podDid);
+    if (credentials.length === 0) {
+      setOpening(false);
+      setNoPassport(true);
+      return;
+    }
+    const res = await api<{ account: AccountView }>(slug, gw('/accounts/open'), { method: 'POST', body: { credentials } });
     setOpening(false);
     if (!res.ok) return setOpenError(res.message);
     await load();
@@ -72,6 +83,11 @@ export function MemberAccount({ slug, unit, base }: { slug: string; unit: string
             <div className="grid gap-4">
               <p>You do not have a credit account here yet. Opening one is free; it starts at zero with a limit set by your standing.</p>
               <ErrorLine message={openError} />
+              {noPassport ? (
+                <Notice kind="warning">
+                  Open your passport to join this pod first. <a href={walletHref}>Open your passport</a>
+                </Notice>
+              ) : null}
               <div>
                 <Button onClick={openAccount} disabled={opening}>
                   {opening ? 'Opening…' : 'Open my account'}

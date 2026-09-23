@@ -14,7 +14,7 @@ export async function api<T>(slug: string, path: string, init: { method?: 'GET' 
     res = await fetch(path, {
       method: init.method ?? 'GET',
       headers,
-      credentials: 'same-origin',
+      credentials: 'include',
       cache: 'no-store',
       ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
     });

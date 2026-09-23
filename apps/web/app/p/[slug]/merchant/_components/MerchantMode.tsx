@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Button, Field, Notice, Select } from '@passport/ui-kit';
 import { ErrorLine, Loading } from '../../circulation/_components/bits';
 import { api, gw, type MyEnterprise } from '../../circulation/_lib/api';
+import { getStaffVac, type Credential } from '../../circulation/_lib/walletCreds';
 import { CommitmentTab } from './CommitmentTab';
 import { ExposureTab } from './ExposureTab';
 import { ReceiptsTab, type RungUp } from './ReceiptsTab';
@@ -14,6 +15,8 @@ import { StaffTab } from './StaffTab';
 
 export interface MerchantProps {
   slug: string;
+  podDid: string;
+  walletHref: string;
   base: string;
   unit: string;
   subject: string;
@@ -40,6 +43,8 @@ export function MerchantMode(props: MerchantProps) {
   const [tab, setTab] = useState<Tab>('ring');
   const [registering, setRegistering] = useState(false);
   const [rungUp, setRungUp] = useState<RungUp[]>([]);
+  // Staff send their passed-on authority with each sale and tender; read it from the passport per enterprise.
+  const [staffVacs, setStaffVacs] = useState<Record<string, Credential | null>>({});
 
   const load = useCallback(async () => {
     const res = await api<{ enterprises: MyEnterprise[] }>(slug, gw('/merchant/enterprises/mine'));
@@ -56,6 +61,18 @@ export function MerchantMode(props: MerchantProps) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const staffDids = (mine ?? []).filter((e) => e.role === 'staff').map((e) => e.did).join(' ');
+  useEffect(() => {
+    if (!staffDids) return;
+    let live = true;
+    void Promise.all(staffDids.split(' ').map(async (did) => [did, await getStaffVac(did, props.subject)] as const)).then((pairs) => {
+      if (live) setStaffVacs(Object.fromEntries(pairs));
+    });
+    return () => {
+      live = false;
+    };
+  }, [staffDids, props.subject]);
 
   if (mine === null) return <Loading />;
 
@@ -91,7 +108,9 @@ export function MerchantMode(props: MerchantProps) {
 
   const ent = mine.find((e) => e.did === selected) ?? mine[0]!;
   const isOwner = ent.role === 'owner';
-  const canRingUp = receiveScopes.includes(ent.did);
+  const staffVac = isOwner ? undefined : (staffVacs[ent.did] ?? undefined);
+  const missingStaffVac = !isOwner && ent.did in staffVacs && !staffVacs[ent.did];
+  const canRingUp = receiveScopes.includes(ent.did) && !missingStaffVac;
   const tabs = TABS.filter((t) => !t.ownerOnly || isOwner);
   const active = tabs.some((t) => t.key === tab) ? tab : 'ring';
 
@@ -149,9 +168,15 @@ export function MerchantMode(props: MerchantProps) {
               slug={slug}
               unit={props.unit}
               enterprise={ent}
+              staffVac={staffVac}
               onRungUp={(r) => setRungUp((list) => [r, ...list.filter((x) => x.transactionId !== r.transactionId)])}
               onSettled={() => void load()}
             />
+          ) : missingStaffVac ? (
+            <Notice kind="warning">
+              Your passport on this device does not hold your staff authority for {ent.name}. Ask the owner to share it with you
+              again, then open your passport. <a href={props.walletHref}>Open your passport</a>
+            </Notice>
           ) : (
             <Notice kind="info">
               To ring up sales for {ent.name}, save your authority to receive payments there to your passport, then present your
@@ -161,7 +186,7 @@ export function MerchantMode(props: MerchantProps) {
         ) : null}
         {active === 'rules' ? <RulesTab key={ent.did} slug={slug} unit={props.unit} enterprise={ent} defaultAcceptance={props.defaultAcceptance} onSaved={load} /> : null}
         {active === 'staff' ? <StaffTab key={ent.did} slug={slug} subject={props.subject} enterprise={ent} onChanged={load} /> : null}
-        {active === 'exposure' ? <ExposureTab key={ent.did} slug={slug} unit={props.unit} enterprise={ent} /> : null}
+        {active === 'exposure' ? <ExposureTab key={ent.did} slug={slug} unit={props.unit} enterprise={ent} staffVac={staffVac} /> : null}
         {active === 'commitment' ? <CommitmentTab key={ent.did} slug={slug} enterprise={ent} onSaved={load} /> : null}
         {active === 'receipts' ? <ReceiptsTab slug={slug} base={props.base} unit={props.unit} rungUp={rungUp.filter((r) => r.enterpriseDid === ent.did)} /> : null}
       </div>

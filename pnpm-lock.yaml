@@ -38,6 +38,12 @@ importers:
       '@passport/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@passport/lexicons':
+        specifier: workspace:*
+        version: link:../../packages/lexicons
+      '@passport/pod-client':
+        specifier: workspace:*
+        version: link:../../packages/pod-client
       '@passport/pod-vta':
         specifier: workspace:*
         version: link:../../services/pod-vta
@@ -68,6 +74,9 @@ importers:
       dexie:
         specifier: ^4.4.6
         version: 4.4.6
+      html5-qrcode:
+        specifier: ^2.3.8
+        version: 2.3.8
       next:
         specifier: ^16.3.6
         version: 16.3.6(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -96,6 +105,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.0.0
         version: 19.3.0(@types/react@19.3.0)
+      fake-indexeddb:
+        specifier: ^6.2.5
+        version: 6.2.5
       tailwindcss:
         specifier: ^4.3.3
         version: 4.3.3
@@ -199,6 +211,55 @@ importers:
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.4
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^5.0.1
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.15))
+
+  packages/pod-client:
+    dependencies:
+      '@noble/hashes':
+        specifier: ^2.4.0
+        version: 2.4.0
+      '@passport/credential-core':
+        specifier: workspace:*
+        version: link:../credential-core
+      '@passport/lexicons':
+        specifier: workspace:*
+        version: link:../lexicons
+      '@passport/tenant-config':
+        specifier: workspace:*
+        version: link:../tenant-config
+      '@passport/vocab':
+        specifier: workspace:*
+        version: link:../vocab
+      dexie:
+        specifier: ^4.4.6
+        version: 4.4.6
+    devDependencies:
+      '@passport/db':
+        specifier: workspace:*
+        version: link:../db
+      '@passport/pod-vta':
+        specifier: workspace:*
+        version: link:../../services/pod-vta
+      '@passport/service-kit':
+        specifier: workspace:*
+        version: link:../service-kit
+      '@passport/trust-index':
+        specifier: workspace:*
+        version: link:../../services/trust-index
+      '@passport/verifier-sdk':
+        specifier: workspace:*
+        version: link:../verifier-sdk
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.4
+      fake-indexeddb:
+        specifier: ^6.2.5
+        version: 6.2.5
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
@@ -1489,6 +1550,10 @@ packages:
     resolution: {integrity: sha512-KfYbmpRm0VbLjEvVa9yGwCi9GI34xvi7A/HXYWQO65CSD2u3MczUJSuwXKFIxlGsgBQizV9q5J9NHj4VG0n+pA==}
     engines: {node: '>=12.0.0'}
 
+  fake-indexeddb@6.2.5:
+    resolution: {integrity: sha512-CGnyrvbhPlWYMngksqrSSUT1BAVP49dZocrHuK0SvtR0D5TMs5wP0o3j7jexDJW01KSadjBp1M/71o/KR3nD1w==}
+    engines: {node: '>=18'}
+
   fdir@6.5.0:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
     engines: {node: '>=12.0.0'}
@@ -1548,6 +1613,9 @@ packages:
   html-encoding-sniffer@4.0.0:
     resolution: {integrity: sha512-Y22oTqIU4uuPgEemfz7NDJz6OeKf12Lsu+QC+s3BVpda64lTiMYCyGwg5ki4vFxkMwQdeZDl2adZoqUgdFuTgQ==}
     engines: {node: '>=18'}
+
+  html5-qrcode@2.3.8:
+    resolution: {integrity: sha512-jsr4vafJhwoLVEDW3n1KvPnCCXWaQfRng0/EEYk1vNcQGcG/htAdhJX0be8YyqMoSz7+hZvOZSTAepsabiuhiQ==}
 
   http-proxy-agent@7.0.2:
     resolution: {integrity: sha512-T1gkAiYYDWYx3V5Bmyu7HcfcvL7mUrTWiM6yOfa3PIphViJ/gFPbvidQ+veqSOHci/PxBcDabeUNCzpOODJZig==}
@@ -2771,6 +2839,8 @@ snapshots:
 
   expect-type@1.4.0: {}
 
+  fake-indexeddb@6.2.5: {}
+
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
       picomatch: 4.0.7
@@ -2830,6 +2900,8 @@ snapshots:
   html-encoding-sniffer@4.0.0:
     dependencies:
       whatwg-encoding: 3.1.1
+
+  html5-qrcode@2.3.8: {}
 
   http-proxy-agent@7.0.2:
     dependencies:
