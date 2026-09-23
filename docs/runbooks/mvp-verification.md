@@ -252,3 +252,19 @@ The run also checked two server-side guarantees: a session from one pod is refus
   - "E2E refusal check (Anchor-only proposals)" (left open, no proposals).
 - Credit account; enterprise "E2E Verification Stall"; payment receipt 2 (4 credit).
 - Offer "E2E verification: bike tune-up".
+
+## Addendum — 2026-09-23, after the final fix wave and peer witnessing (deploy from `daf43b9`)
+
+Smoke run with curl against production after both pods were migrated to `0012`:
+
+| Check | Result |
+|---|---|
+| `/` and `/api/health` (2 pods, 0 pending migrations) | 200 |
+| `boulder.bioregionalpassport.org/p/boulder/map`, `/directory`, `/events` | 200 (directory lists 8 enterprises; events show "Boulder Creek Cleanup + Attestation" with the Attestation gathering pill, Sat Sep 26 10:00 AM MDT) |
+| `/p/boulder/grants` and `/p/tenant-zero/merchant` on pod hosts | 307 to the platform origin (wallet-dependent sections, ADR-032) |
+| `bioregionalpassport.org/p/tenant-zero/merchant` | 200 (Merchant Mode enabled on the demo pod) |
+| `/wallet/witness` | 200 (peer witnessing screen) |
+| Security headers | CSP, `X-Frame-Options: DENY`, `nosniff`, referrer policy present |
+| `passport bioregion verify boulder` / `tenant-zero` | 7/7 checks pass on production data |
+
+Earlier issues 1–3 (map/directory placeholders, events source) and 6 (merchant off on tenant-zero) are resolved; issue 4 is resolved by the platform-origin redirects; issue 5 (steward list) by re-reading after actions. Open cosmetic item: the two non-attestation seeded events are seeded at 11:00 PM MDT because the seeder uses server local time (`services/appview/src/seed.ts`).
