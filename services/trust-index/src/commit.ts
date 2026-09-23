@@ -57,6 +57,39 @@ function asTier(value: unknown): Tier | null {
   return typeof value === 'string' && (TIERS as readonly string[]).includes(value) ? (value as Tier) : null;
 }
 
+interface MemberTierRow {
+  tier: string | null;
+  effective_tier: string | null;
+  effective_until: Date | string | null;
+}
+
+/**
+ * The tier a member stands at for weighting vouches: the higher of the governance tier (`members.tier`) and the
+ * PEP effective tier (`members.effective_tier`), the latter only while `effective_until` is unset or in the
+ * future (ADR-037).
+ */
+export function standingTier(row: MemberTierRow, now: Date): Tier | null {
+  const governance = asTier(row.tier);
+  const until = row.effective_until === null ? null : new Date(row.effective_until).getTime();
+  const effective = until === null || until > now.getTime() ? asTier(row.effective_tier) : null;
+  if (governance === null) return effective;
+  if (effective === null) return governance;
+  return isAtLeast(effective, governance) ? effective : governance;
+}
+
+function notAnEdgeParty(): ServiceError {
+  return new ServiceError(400, 'NOT_AN_EDGE_PARTY', 'This witness credential is for a relationship you are not part of.');
+}
+
+/** True when `poster` is one of the `credentialSubject.edgeParties` of the stored VWC with digest `witnessRef`. */
+async function isEdgeParty(ctx: IndexContext, witnessRef: string, poster: string): Promise<boolean> {
+  const [row] = await ctx.db.query<{ vwc: unknown }>('SELECT vwc FROM vta_witness_credentials WHERE digest = $1', [witnessRef]);
+  if (!row) return false;
+  const vwc = (typeof row.vwc === 'string' ? JSON.parse(row.vwc) : row.vwc) as VerifiableCredential;
+  const parties = vwc?.credentialSubject?.['edgeParties'];
+  return Array.isArray(parties) && parties.includes(poster);
+}
+
 function duplicateEvidence(): ServiceError {
   return new ServiceError(400, 'DUPLICATE_EVIDENCE', 'This endorsement has already been counted.');
 }
@@ -102,11 +135,14 @@ async function verifyEndorsementEvidence(
 /**
  * Stores a member's opted-in commitments. `poster` is the session subject.
  *
- * - `witnessed` = a witness reference was given, exists in `witness_refs`, and
- *   at most two posters claim it.
+ * - `witnessed` = a witness reference was given, exists in `witness_refs`, the
+ *   poster is one of the `edgeParties` of the stored VWC
+ *   (`vta_witness_credentials`, else 400 `NOT_AN_EDGE_PARTY`), and at most two
+ *   posters claim it.
  * - `weighted` (endorsement scopes only) = the item carries `evidence.vec`, a
  *   VEC whose proof verifies, whose subject is the poster, and whose issuer is
- *   a pod member recorded at T2 or above. The PEP can also set it via
+ *   a pod member standing at T2 or above (the higher of governance tier and a
+ *   current PEP effective tier, see `standingTier`). The PEP can also set it via
  *   `markWeighted`.
  * - Only for such weighted endorsements the index stores one link row
  *   `issuer → poster` in `index_links` (the seed-hop adjacency). This is a
@@ -160,6 +196,14 @@ export async function commitEdges(
     digests.set(i, digest);
   }
 
+  // Witness results travel over a public relay channel, so anyone can compute a VWC digest: only the two
+  // parties named in the stored credential's `edgeParties` may claim it (ADR-033). Checked before any write.
+  for (const item of parsed.data.commitments) {
+    if (!item.witnessRef) continue;
+    const ref = await ctx.db.query('SELECT digest FROM witness_refs WHERE digest = $1', [item.witnessRef]);
+    if (ref.length > 0 && !(await isEdgeParty(ctx, item.witnessRef, poster))) throw notAnEdgeParty();
+  }
+
   const items: CommitItemResult[] = [];
   for (const [i, item] of parsed.data.commitments.entries()) {
     const result: CommitItemResult = {
@@ -192,7 +236,6 @@ export async function commitEdges(
       witnessFound = w.length > 0;
       if (!witnessFound) result.note = 'The witness reference was not found, so this is stored as unwitnessed.';
     }
-
     let claimsWitness = false;
     if (witnessFound) {
       const claimants = await ctx.db.query<{ poster_did: string }>(
@@ -221,8 +264,11 @@ export async function commitEdges(
     const issuer = issuers.get(i);
     let weighted = false;
     if (issuer) {
-      const rows = await ctx.db.query<{ tier: string }>('SELECT tier FROM members WHERE did = $1', [issuer]);
-      const tier = asTier(rows[0]?.tier);
+      const rows = await ctx.db.query<MemberTierRow>(
+        'SELECT tier, effective_tier, effective_until FROM members WHERE did = $1',
+        [issuer],
+      );
+      const tier = rows[0] ? standingTier(rows[0], now) : null;
       if (!rows[0]) result.note = 'The endorser is not a member of this pod, so this endorsement is not weighted.';
       else if (tier === null || !isAtLeast(tier, 'T2')) result.note = 'The endorser is below T2, so this endorsement is not weighted.';
       weighted = tier !== null && isAtLeast(tier, 'T2');

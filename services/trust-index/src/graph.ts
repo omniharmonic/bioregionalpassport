@@ -76,6 +76,9 @@ export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph;
     const expired = row.valid_until !== null && toDate(row.valid_until).getTime() <= now;
     m.membership = !acked ? 'pending' : expired ? 'expired' : 'complete';
     m.vmcPairComplete = m.membership === 'complete';
+    // Governance tier only (steward/operator record): it feeds the governance requirements
+    // (electedByGovernance, namedInGovernance), which the PEP effective tier must never satisfy
+    // (that would be circular). Vouch weighting uses the standing tier at commit time (commit.ts `standingTier`).
     m.recordedTier = asTier(row.tier);
   }
 

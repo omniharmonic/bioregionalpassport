@@ -4,7 +4,7 @@ import type { RouteRequest, SessionClaims } from '@passport/service-kit';
 import { ServiceError } from '@passport/service-kit';
 import { defaultTrustPolicy, tenantZeroManifest, type TrustPolicy } from '@passport/tenant-config';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { commitEdges, markWeighted } from './commit.js';
+import { commitEdges, markWeighted, standingTier } from './commit.js';
 import { stewardFlags } from './flags.js';
 import { createTrustIndexRoutes, recommendTier, recomputeAll } from './service.js';
 import type { IndexContext } from './types.js';
@@ -55,7 +55,8 @@ interface Pod {
   policy: TrustPolicy;
   run<T>(fn: (ctx: IndexContext) => Promise<T>, now?: Date): Promise<T>;
   member(did: string, tier?: string): Promise<void>;
-  witness(digest: string, eventId: string, convener: string): Promise<void>;
+  /** A witness ref plus its stored VWC naming `parties` as the edge parties (as pod-vta `witnessEdge` writes). */
+  witness(digest: string, eventId: string, convener: string, parties: readonly string[]): Promise<void>;
   post(poster: string, commitments: unknown[], now?: Date): Promise<void>;
   /** `to` opts in a VEC from `from` (a T2+ member) ⇒ weighted endorsement + link from → to. */
   endorse(from: KeyPair, to: string, scope?: 'lives-here' | 'worked-with' | 'knows'): Promise<void>;
@@ -82,9 +83,15 @@ async function newPod(): Promise<Pod> {
           `zAck-${did}`,
         ]);
       }),
-    witness: (digest, eventId, convener) =>
+    witness: (digest, eventId, convener, parties) =>
       withPod(db, slug, async (tx) => {
         await tx.query('INSERT INTO witness_refs (digest, event_id, convener_did) VALUES ($1, $2, $3)', [digest, eventId, convener]);
+        const vwc = {
+          type: ['VerifiableCredential', 'StatementCredential'],
+          issuer: POD_DID,
+          credentialSubject: { predicate: 'dtg:witnessed', witnessedBy: convener, edgeParties: [...parties] },
+        };
+        await tx.query('INSERT INTO vta_witness_credentials (digest, vwc) VALUES ($1, $2)', [digest, JSON.stringify(vwc)]);
       }),
     post: async (poster, commitments, now = NOW) => {
       await pod.run((ctx) => commitEdges(ctx, poster, { commitments }, { resolver }), now);
@@ -107,9 +114,9 @@ async function trustedScenario(hops: number): Promise<{ pod: Pod; m: string }> {
   await pod.member(m, 'T1');
   await pod.member(E1.did, 'T2');
   await pod.member(E2.did, 'T2');
-  await pod.witness('w1', 'event-1', 'did:key:zC1');
-  await pod.witness('w2', 'event-1', 'did:key:zC2');
-  await pod.witness('w3', 'event-2', 'did:key:zC1');
+  await pod.witness('w1', 'event-1', 'did:key:zC1', [m, 'did:key:zO1']);
+  await pod.witness('w2', 'event-1', 'did:key:zC2', [m, 'did:key:zO2']);
+  await pod.witness('w3', 'event-2', 'did:key:zC1', [m, 'did:key:zO3']);
   await pod.post(m, [
     { commitment: 'commit-w1-aaaaaaaa', scope: 'relationship', witnessRef: 'w1' },
     { commitment: 'commit-w2-aaaaaaaa', scope: 'relationship', witnessRef: 'w2' },
@@ -134,7 +141,7 @@ describe('trust index on PGlite', () => {
     const pod = await newPod();
     await pod.member(SEED, 'T4');
     await pod.member('did:key:zA', 'T1');
-    await pod.witness('wa', 'event-1', 'did:key:zC1');
+    await pod.witness('wa', 'event-1', 'did:key:zC1', ['did:key:zA', 'did:key:zB']);
     await pod.post('did:key:zA', [{ commitment: 'commit-a-1-aaaaaa', scope: 'relationship', witnessRef: 'wa' }]);
     const rec = await pod.run((ctx) => recommendTier(ctx, 'did:key:zA'));
     expect(rec.tier).toBe('T1');
@@ -216,8 +223,8 @@ describe('trust index on PGlite', () => {
   it('flags members whose witnessed edges all share a single convener', async () => {
     const pod = await newPod();
     await pod.member('did:key:zS', 'T1');
-    await pod.witness('ws1', 'event-1', 'did:key:zC9');
-    await pod.witness('ws2', 'event-2', 'did:key:zC9');
+    await pod.witness('ws1', 'event-1', 'did:key:zC9', ['did:key:zS', 'did:key:zT1']);
+    await pod.witness('ws2', 'event-2', 'did:key:zC9', ['did:key:zS', 'did:key:zT2']);
     await pod.post('did:key:zS', [
       { commitment: 'shared-1-aaaaaaaa', scope: 'relationship', witnessRef: 'ws1' },
       { commitment: 'shared-2-aaaaaaaa', scope: 'relationship', witnessRef: 'ws2' },
@@ -230,7 +237,7 @@ describe('trust index on PGlite', () => {
   it('recompute returns counts by tier', async () => {
     const { pod } = await trustedScenario(3);
     await pod.member('did:key:zNew', 'T1');
-    await pod.witness('wn', 'event-3', 'did:key:zC3');
+    await pod.witness('wn', 'event-3', 'did:key:zC3', ['did:key:zNew', 'did:key:zN2']);
     await pod.post('did:key:zNew', [{ commitment: 'new-1-aaaaaaaaaa', scope: 'relationship', witnessRef: 'wn' }]);
     const result = await pod.run((ctx) => recomputeAll(ctx));
     // T2: member; T1: zNew; T4: seed (recorded T4 by governance ⇒ namedInGovernance);
@@ -250,8 +257,8 @@ describe('trust index on PGlite', () => {
         [X, new Date(NOW.getTime() - 86_400_000)],
       );
     });
-    await pod.witness('wp', 'event-1', 'did:key:zC1');
-    await pod.witness('wq', 'event-1', 'did:key:zC1');
+    await pod.witness('wp', 'event-1', 'did:key:zC1', [P, 'did:key:zP2']);
+    await pod.witness('wq', 'event-1', 'did:key:zC1', [X, 'did:key:zX2']);
     await pod.post(P, [{ commitment: 'pending-1-aaaaaaa', scope: 'relationship', witnessRef: 'wp' }]);
     await pod.post(X, [{ commitment: 'expired-1-aaaaaaa', scope: 'relationship', witnessRef: 'wq' }]);
 
@@ -286,7 +293,7 @@ describe('trust index on PGlite', () => {
     const pod = await newPod();
     const P = 'did:key:zP';
     await pod.member(P, 'T1');
-    await pod.witness('wx', 'event-1', 'did:key:zC1');
+    await pod.witness('wx', 'event-1', 'did:key:zC1', [P, 'did:key:zQ']);
     const result = await pod.run((ctx) =>
       commitEdges(ctx, P, {
         commitments: [
@@ -302,12 +309,13 @@ describe('trust index on PGlite', () => {
     expect(result.items[1]!.note).toMatch(/not found/);
     expect(result.items[2]).toMatchObject({ weighted: false, linked: false });
 
-    // the other party posts the same commitment: allowed; a third claimant is not credited
+    // the other party posts the same commitment: allowed; a third member (not an edge party) is refused
     await pod.post('did:key:zQ', [{ commitment: 'edge-x-aaaaaaaa', scope: 'relationship', witnessRef: 'wx' }]);
-    const third = await pod.run((ctx) =>
-      commitEdges(ctx, 'did:key:zR', { commitments: [{ commitment: 'edge-x2-aaaaaaa', scope: 'relationship', witnessRef: 'wx' }] }),
-    );
-    expect(third.items[0]).toMatchObject({ status: 'accepted', witnessed: false });
+    await expect(
+      pod.run((ctx) =>
+        commitEdges(ctx, 'did:key:zR', { commitments: [{ commitment: 'edge-x2-aaaaaaa', scope: 'relationship', witnessRef: 'wx' }] }),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: 'NOT_AN_EDGE_PARTY' });
 
     const dup = await pod.run((ctx) =>
       commitEdges(ctx, P, { commitments: [{ commitment: 'edge-x-aaaaaaaa', scope: 'relationship', witnessRef: 'wx' }] }),
@@ -402,6 +410,39 @@ describe('endorsement evidence (VEC)', () => {
     expect(await links(pod)).toEqual([]);
   });
 
+  it('a member at effective T2 (governance T1) gives a weighted vouch; an expired effective tier does not count', async () => {
+    const pod = await newPod();
+    const eff = persona('effective-t2');
+    const lapsed = persona('lapsed-t2');
+    await pod.member(M.did, 'T1');
+    await pod.member(eff.did, 'T1');
+    await pod.member(lapsed.did, 'T1');
+    await pod.run(async (ctx) => {
+      await ctx.db.query("UPDATE members SET effective_tier = 'T2', effective_until = $2 WHERE did = $1", [
+        eff.did,
+        new Date(NOW.getTime() + 86_400_000),
+      ]);
+      await ctx.db.query("UPDATE members SET effective_tier = 'T2', effective_until = $2 WHERE did = $1", [
+        lapsed.did,
+        new Date(NOW.getTime() - 86_400_000),
+      ]);
+    });
+    const ok = await commitWith(pod, M.did, { vec: vec(eff, M.did) });
+    expect(ok.items[0]).toMatchObject({ status: 'accepted', weighted: true, linked: true });
+    const no = await commitWith(pod, M.did, { vec: vec(lapsed, M.did) }, 'vec-commit-dddddddd');
+    expect(no.items[0]).toMatchObject({ weighted: false, linked: false });
+    expect(no.items[0]!.note).toMatch(/below T2/);
+    expect(await links(pod)).toEqual([{ from_did: eff.did, to_did: M.did }]);
+  });
+
+  it('standingTier is the higher of governance and a current effective tier', () => {
+    expect(standingTier({ tier: 'T1', effective_tier: 'T2', effective_until: null }, NOW)).toBe('T2');
+    expect(standingTier({ tier: 'T3', effective_tier: 'T2', effective_until: null }, NOW)).toBe('T3');
+    expect(standingTier({ tier: 'T1', effective_tier: 'T3', effective_until: new Date(NOW.getTime() - 1) }, NOW)).toBe('T1');
+    expect(standingTier({ tier: null, effective_tier: 'T2', effective_until: new Date(NOW.getTime() + 1) }, NOW)).toBe('T2');
+    expect(standingTier({ tier: 'bogus', effective_tier: null, effective_until: null }, NOW)).toBe(null);
+  });
+
   it('replaying the same VEC on a second commitment → 400 DUPLICATE_EVIDENCE (same request or later)', async () => {
     const pod = await newPod();
     await pod.member(E1.did, 'T2');
@@ -462,6 +503,44 @@ describe('endorsement evidence (VEC)', () => {
   });
 });
 
+describe('witness claims (edge parties only)', () => {
+  const A = 'did:key:zPartyA';
+  const B = 'did:key:zPartyB';
+  const C = 'did:key:zThirdMember';
+  const claim = (pod: Pod, poster: string, commitment: string) =>
+    pod.run((ctx) => commitEdges(ctx, poster, { commitments: [{ commitment, scope: 'relationship', witnessRef: 'wvwc' }] }));
+
+  it("a third member claiming a real pair's VWC is refused and blocks nothing; both parties succeed", async () => {
+    const pod = await newPod();
+    for (const did of [A, B, C]) await pod.member(did, 'T1');
+    await pod.witness('wvwc', 'event-1', 'did:key:zConv', [A, B]);
+
+    // C computed the digest from the public relay result and claims it first: refused, nothing written.
+    await expect(claim(pod, C, 'pair-edge-cccccccc')).rejects.toMatchObject({
+      status: 400,
+      code: 'NOT_AN_EDGE_PARTY',
+      message: 'This witness credential is for a relationship you are not part of.',
+    });
+    expect(await pod.run((ctx) => ctx.db.query('SELECT * FROM index_postings WHERE poster_did = $1', [C]))).toEqual([]);
+
+    const a = await claim(pod, A, 'pair-edge-aaaaaaaa');
+    const b = await claim(pod, B, 'pair-edge-aaaaaaaa');
+    expect(a.items[0]).toMatchObject({ status: 'accepted', witnessed: true });
+    expect(b.items[0]).toMatchObject({ status: 'accepted', witnessed: true });
+    expect((await pod.run((ctx) => recommendTier(ctx, A))).metrics.witnessedEdges).toBe(1);
+    expect((await pod.run((ctx) => recommendTier(ctx, B))).metrics.witnessedEdges).toBe(1);
+  });
+
+  it('a witness ref with no stored credential cannot be claimed by anyone', async () => {
+    const pod = await newPod();
+    await pod.member(A, 'T1');
+    await pod.run((ctx) =>
+      ctx.db.query("INSERT INTO witness_refs (digest, event_id, convener_did) VALUES ('wvwc', 'event-1', 'did:key:zConv')"),
+    );
+    await expect(claim(pod, A, 'pair-edge-aaaaaaaa')).rejects.toMatchObject({ status: 400, code: 'NOT_AN_EDGE_PARTY' });
+  });
+});
+
 describe('routes', () => {
   const routes = createTrustIndexRoutes();
   const route = (method: string, path: string) => routes.find((r) => r.method === method && r.path === path)!;
@@ -481,7 +560,7 @@ describe('routes', () => {
   it('commit → explanation → flags → recompute', async () => {
     const pod = await newPod();
     await pod.member('did:key:zA', 'T1');
-    await pod.witness('wr', 'event-1', 'did:key:zC1');
+    await pod.witness('wr', 'event-1', 'did:key:zC1', ['did:key:zA', 'did:key:zB']);
 
     await expect(pod.run((ctx) => route('POST', '/commit').handler(ctx, req(undefined, {})))).rejects.toMatchObject({
       status: 401,
