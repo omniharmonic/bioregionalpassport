@@ -41,6 +41,51 @@ export function slugFromHost(rawHost: string | null | undefined, cfg: HostConfig
   return null;
 }
 
+/**
+ * Paths a pod host (`<slug>.<PLATFORM_DOMAIN>`) serves from the shared app
+ * instead of rewriting onto `/p/<slug>/…`: the PWA manifest and icon, Next
+ * internals, the service APIs, hosted DID documents and `.well-known` files
+ * other than the pod manifest. The proxy still sets `x-pod` on them.
+ * `/wallet` is not here: it has one canonical origin (see `walletRedirectUrl`).
+ */
+export const POD_HOST_PASSTHROUGH: readonly RegExp[] = [
+  /^\/manifest\.webmanifest$/,
+  /^\/icon\.svg$/,
+  /^\/_next(\/|$)/,
+  /^\/api(\/|$)/,
+  /^\/dids(\/|$)/,
+  // Except the pod's own signed manifest, which a pod host serves from `/p/<slug>/.well-known/bioregion.json`
+  // (the platform route at `/.well-known/bioregion.json` is the platform card).
+  /^\/\.well-known(\/(?!bioregion\.json$)|$)/,
+];
+
+/** Whether a pod host serves `pathname` from the shared app (no `/p/<slug>` rewrite). */
+export function isPodHostPassthrough(pathname: string): boolean {
+  return POD_HOST_PASSTHROUGH.some((re) => re.test(pathname));
+}
+
+/** `/wallet` and everything below it. */
+export const isWalletPath = (pathname: string): boolean => /^\/wallet(\/|$)/.test(pathname);
+
+/**
+ * The wallet's one canonical origin is the platform host: IndexedDB is per origin, so a wallet on every pod
+ * host would split one person's passport into several. A pod host's `/wallet…` redirects there with
+ * `?pod=<slug>` (other query parameters kept). `<slug>.localhost[:port]` redirects to `localhost[:port]`
+ * over the same protocol; every other host to `https://<platformDomain>`.
+ */
+export function walletRedirectUrl(url: URL, slug: string, platformDomain: string): URL {
+  const host = normalizeHost(url.host);
+  const target = new URL(url.toString());
+  if (host === 'localhost' || host.endsWith('.localhost')) {
+    target.hostname = 'localhost';
+  } else {
+    target.protocol = 'https:';
+    target.host = platformDomain.toLowerCase();
+  }
+  target.searchParams.set('pod', slug);
+  return target;
+}
+
 /** `/p/<slug>/…` → slug. */
 export function slugFromPath(pathname: string): string | null {
   const m = /^\/p\/([^/]+)(?:\/|$)/.exec(pathname);

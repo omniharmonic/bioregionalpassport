@@ -7,8 +7,9 @@ import { parseManifestJson } from '../manifestValidation';
 import { errorMessage, operatorFetch, type ApiError, isApiError } from '../api';
 import type { HealthDetailResponse, VerifyReport } from '../types';
 import { useOperatorToken } from '../useOperatorToken';
+import { BootstrapStewardPanel } from './BootstrapStewardPanel';
 
-type Tab = 'manifest' | 'anchors' | 'governance' | 'trustPolicy' | 'modules' | 'health' | 'verify' | 'export';
+type Tab = 'manifest' | 'anchors' | 'governance' | 'trustPolicy' | 'modules' | 'steward' | 'health' | 'verify' | 'export';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'manifest', label: 'Manifest' },
@@ -16,6 +17,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'governance', label: 'Governance' },
   { key: 'trustPolicy', label: 'Trust policy' },
   { key: 'modules', label: 'Modules' },
+  { key: 'steward', label: 'First steward' },
   { key: 'health', label: 'Health' },
   { key: 'verify', label: 'Verify' },
   { key: 'export', label: 'Export' },
@@ -295,6 +297,8 @@ export function OperatorPodConsole({ slug }: { slug: string }) {
           onSave={() => void save(false)}
         />
       ) : null}
+
+      {tab === 'steward' ? <BootstrapStewardPanel slug={slug} token={token} /> : null}
 
       {tab === 'health' ? <HealthTab detail={detail} /> : null}
 

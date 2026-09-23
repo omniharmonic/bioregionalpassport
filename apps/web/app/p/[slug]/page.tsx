@@ -2,7 +2,7 @@ import { Button, Card, Explain, TierBadge, type Tier } from '@passport/ui-kit';
 import { copy } from '@passport/tenant-config';
 import { loadPod } from '@/lib/pod';
 import { describeRequirement, greeting, tierName } from '@/lib/podCopy';
-import { podLinks } from '@/lib/podNav';
+import { isStewardSession, podLinks } from '@/lib/podNav';
 import { currentPodBase } from '@/lib/podRequest';
 import { getSession } from '@/lib/session';
 
@@ -15,7 +15,7 @@ export default async function PodHome({ params }: PageProps<'/p/[slug]'>) {
   const [pod, base, session] = await Promise.all([loadPod(slug), currentPodBase(slug), getSession().catch(() => null)]);
   const { manifest } = pod;
   const { title, lede } = greeting(manifest);
-  const tiles = podLinks(manifest, base).filter((l) => l.key !== 'home');
+  const tiles = podLinks(manifest, base, { steward: isStewardSession(session, pod.did) }).filter((l) => l.key !== 'home');
   const mySession = session && session.pod === pod.did ? session : null;
   const tier = mySession?.tier && TIERS.has(mySession.tier) ? (mySession.tier as Tier) : null;
 

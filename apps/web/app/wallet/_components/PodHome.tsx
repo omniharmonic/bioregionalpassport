@@ -22,6 +22,7 @@ export function PodHome() {
   const [member, setMember] = useState(false);
   const [missingKeys, setMissingKeys] = useState(0);
   const [showWhy, setShowWhy] = useState(false);
+  const [copiedId, setCopiedId] = useState(false);
 
   useEffect(() => {
     const wallet = w.wallet;
@@ -109,7 +110,14 @@ export function PodHome() {
             <p className="eyebrow">Your passport in</p>
             <h1 className="mt-1 text-3xl font-semibold">{manifest.identity.name}</h1>
             <p className="mt-2 text-sm muted">
-              Your identifier here <Did did={pod.personaDid} />
+              Your identifier here <Did did={pod.personaDid} />{' '}
+              <button
+                type="button"
+                className="underline"
+                onClick={() => void navigator.clipboard?.writeText(pod.personaDid).then(() => setCopiedId(true), () => setCopiedId(false))}
+              >
+                {copiedId ? 'Copied' : 'Copy'}
+              </button>
             </p>
           </div>
           <TierBadge tier={tier} name={tierName} className="text-sm" />

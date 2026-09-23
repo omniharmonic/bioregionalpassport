@@ -23,6 +23,8 @@ const nextConfig: NextConfig = {
   // Trace files from the monorepo root so workspace packages are included.
   outputFileTracingRoot: path.resolve(process.cwd(), '../..'),
   poweredByHeader: false,
+  // Next 16 `next dev` writes AGENTS.md / CLAUDE.md into the app by default; this repo keeps its own.
+  agentRules: false,
 };
 
 export default nextConfig;

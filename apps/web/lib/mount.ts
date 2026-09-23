@@ -14,7 +14,7 @@
  */
 import type { RouteAuth, RouteRequest, RouteResult, SessionClaims } from '@passport/service-kit';
 import { resolveSlug, type HostConfig } from './tenant';
-import { SESSION_COOKIE, SESSION_MAX_AGE_SEC, clearSessionCookieHeader, readCookie, sessionCookieHeader } from './cookies';
+import { SESSION_COOKIE, SESSION_MAX_AGE_SEC, clearSessionCookieHeaders, readCookie, sessionCookieDomain, sessionCookieHeader } from './cookies';
 
 export type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
@@ -380,8 +380,13 @@ export function mountService(routes: MountableRoute[], opts: MountOptions, depsS
       const path = subPath(url.pathname, opts.base);
       const method = req.method.toUpperCase();
 
+      // Platform-wide session cookie on the platform domain and its pod sub-domains; host-only elsewhere.
+      const cookieDomain = sessionCookieDomain(req.headers.get('x-forwarded-host') ?? req.headers.get('host') ?? url.host, deps.platformDomain);
+
       if (opts.sessionEndpoint && method === 'DELETE' && path.replace(/\/+$/, '') === '/session') {
-        return json(200, { ok: true }, { 'set-cookie': clearSessionCookieHeader(deps.secureCookies) });
+        const h = new Headers();
+        for (const c of clearSessionCookieHeaders(deps.secureCookies, cookieDomain)) h.append('set-cookie', c);
+        return json(200, { ok: true }, h);
       }
 
       const match = matchRoute(routes, method, path);
@@ -438,7 +443,7 @@ export function mountService(routes: MountableRoute[], opts: MountOptions, depsS
       const trimmed = path.replace(/\/+$/, '');
       const isSessionPath = trimmed === '/session' || trimmed.startsWith('/session/');
       if (method === 'POST' && isSessionPath && typeof token === 'string' && token.length > 0) {
-        headers.append('set-cookie', sessionCookieHeader(token, deps.secureCookies));
+        headers.append('set-cookie', sessionCookieHeader(token, deps.secureCookies, cookieDomain));
         // The token lives only in the HttpOnly cookie; never hand it to page scripts.
         const { token: _token, ...rest } = body as Record<string, unknown>;
         body = { ok: true, ...rest };

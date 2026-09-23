@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveSlug, slugFromHost, slugFromPath } from './tenant';
+import { isPodHostPassthrough, isWalletPath, resolveSlug, walletRedirectUrl, slugFromHost, slugFromPath } from './tenant';
 
 const cfg = { platformDomain: 'bioregionalpassport.org', customDomains: { 'commons.boulder.org': 'boulder' } };
 
@@ -58,5 +58,45 @@ describe('resolveSlug order: host → /p/<slug> path → x-pod header → ?pod='
   it('skips invalid candidates and returns null when nothing is valid', () => {
     expect(resolveSlug(req('https://bioregionalpassport.org/api/x?pod=BAD!', { 'x-pod': '../etc' }), cfg)).toBeNull();
     expect(resolveSlug(req('https://bioregionalpassport.org/api/x?pod=boulder', { 'x-pod': 'Not Valid' }), cfg)).toBe('boulder');
+  });
+});
+
+describe('isPodHostPassthrough', () => {
+  it('passes shared app paths through on a pod host', () => {
+    for (const p of [
+      '/manifest.webmanifest',
+      '/icon.svg',
+      '/_next/data/x.json',
+      '/api/vta/session',
+      '/api',
+      '/dids/boulder/did.json',
+      '/.well-known/security.txt',
+    ]) {
+      expect(isPodHostPassthrough(p), p).toBe(true);
+    }
+  });
+  it('rewrites pod pages and the pod manifest; the wallet is not served on pod hosts', () => {
+    for (const p of ['/', '/wallet', '/wallet/settings', '/events', '/wallets', '/apis', '/icon.svg.bak', '/manifest.webmanifest/x', '/.well-known/bioregion.json', '/steward']) {
+      expect(isPodHostPassthrough(p), p).toBe(false);
+    }
+  });
+});
+
+describe('wallet canonical origin', () => {
+  it('recognises /wallet paths', () => {
+    expect(isWalletPath('/wallet')).toBe(true);
+    expect(isWalletPath('/wallet/events')).toBe(true);
+    expect(isWalletPath('/wallets')).toBe(false);
+    expect(isWalletPath('/p/boulder/wallet')).toBe(false);
+  });
+  it('sends a pod host wallet URL to the platform host with ?pod=<slug>, keeping the path and other params', () => {
+    const u = walletRedirectUrl(new URL('http://boulder.bioregionalpassport.org/wallet/events?x=1&pod=other'), 'boulder', 'bioregionalpassport.org');
+    expect(u.toString()).toBe('https://bioregionalpassport.org/wallet/events?x=1&pod=boulder');
+    const custom = walletRedirectUrl(new URL('https://passport.boulder.coop/wallet'), 'boulder', 'bioregionalpassport.org');
+    expect(custom.toString()).toBe('https://bioregionalpassport.org/wallet?pod=boulder');
+  });
+  it('keeps protocol and port for <slug>.localhost', () => {
+    const u = walletRedirectUrl(new URL('http://boulder.localhost:3000/wallet?join=boulder'), 'boulder', 'bioregionalpassport.org');
+    expect(u.toString()).toBe('http://localhost:3000/wallet?join=boulder&pod=boulder');
   });
 });

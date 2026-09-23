@@ -1,16 +1,18 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { slugFromHost } from './lib/tenant';
+import { isPodHostPassthrough, isWalletPath, slugFromHost, walletRedirectUrl } from './lib/tenant';
 
 /**
  * Tenant routing (B2 §2.3). A pod host (`<slug>.<PLATFORM_DOMAIN>`,
  * `<slug>.localhost:3000`, or a custom domain from `POD_CUSTOM_DOMAINS`) is
  * rewritten onto `/p/<slug>/…` and every request from it carries an
  * authoritative `x-pod` header. The bare platform domain and `www.` stay the
- * platform site.
+ * platform site. Shared app paths (`/api`, `/dids`, `/.well-known`, the PWA
+ * manifest and icon, `/_next`) pass through un-rewritten on a pod host (see
+ * `POD_HOST_PASSTHROUGH`). `/wallet…` on a pod host redirects (307) to the
+ * wallet's one canonical origin, the platform host, with `?pod=<slug>`; the
+ * session it opens there reaches pod pages through the platform-wide cookie
+ * (`sessionCookieDomain` in `lib/cookies.ts`).
  */
-
-/** Paths on a pod host that are shared app routes, not pod pages. */
-const PASSTHROUGH = [/^\/api(\/|$)/, /^\/wallet(\/|$)/, /^\/dids(\/|$)/, /^\/_next(\/|$)/];
 
 function customDomains(): Record<string, string> {
   const out: Record<string, string> = {};
@@ -35,12 +37,20 @@ export function proxy(request: NextRequest) {
     return NextResponse.next({ request: { headers } });
   }
 
+  const { pathname } = request.nextUrl;
+  if (isWalletPath(pathname)) {
+    const forwardedProto = request.headers.get('x-forwarded-proto');
+    const url = new URL(request.nextUrl.toString());
+    if (host) url.host = host;
+    if (forwardedProto === 'http' || forwardedProto === 'https') url.protocol = `${forwardedProto}:`;
+    return NextResponse.redirect(walletRedirectUrl(url, slug, platformDomain), 307);
+  }
+
   headers.set('x-pod', slug);
   headers.set('x-pod-host', '1');
 
-  const { pathname } = request.nextUrl;
   const alreadyScoped = pathname === `/p/${slug}` || pathname.startsWith(`/p/${slug}/`);
-  if (alreadyScoped || PASSTHROUGH.some((re) => re.test(pathname))) {
+  if (alreadyScoped || isPodHostPassthrough(pathname)) {
     return NextResponse.next({ request: { headers } });
   }
   const url = request.nextUrl.clone();

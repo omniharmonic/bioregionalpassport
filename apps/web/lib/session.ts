@@ -1,8 +1,8 @@
 import 'server-only';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { readSession } from '@passport/verifier-sdk';
 import type { SessionClaims } from '@passport/service-kit';
-import { SESSION_COOKIE, SESSION_MAX_AGE_SEC } from './cookies';
+import { SESSION_COOKIE, SESSION_MAX_AGE_SEC, sessionCookieDomain } from './cookies';
 import { env } from './env';
 import { toSessionClaims } from './runtime';
 
@@ -19,18 +19,29 @@ export async function getSession(): Promise<SessionClaims | null> {
   }
 }
 
+/** Platform-wide cookie domain for this request (see `sessionCookieDomain`), or undefined for host-only. */
+async function cookieDomain(): Promise<string | undefined> {
+  const h = await headers();
+  return sessionCookieDomain(h.get('x-forwarded-host') ?? h.get('host'), env().PLATFORM_DOMAIN);
+}
+
 /** Sets the session cookie (route handlers and server actions only). */
 export async function setSessionCookie(token: string): Promise<void> {
+  const domain = await cookieDomain();
   (await cookies()).set(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: 'lax',
     secure: env().isProduction,
     path: '/',
     maxAge: SESSION_MAX_AGE_SEC,
+    ...(domain ? { domain } : {}),
   });
 }
 
 /** Clears the session cookie (route handlers and server actions only). */
 export async function clearSessionCookie(): Promise<void> {
-  (await cookies()).delete(SESSION_COOKIE);
+  const domain = await cookieDomain();
+  const jar = await cookies();
+  if (domain) jar.set(SESSION_COOKIE, '', { path: '/', maxAge: 0, domain });
+  else jar.delete(SESSION_COOKIE);
 }

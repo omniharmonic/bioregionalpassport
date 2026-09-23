@@ -197,6 +197,15 @@ describe('mountService (pod scope)', () => {
       expect(cookie).toMatch(/Secure/);
       expect(cookie).toMatch(/Path=\//);
       expect(cookie).toMatch(/Max-Age=3600/);
+      // Pod sub-domain of the platform: platform-wide cookie, so pod pages and the platform wallet share it.
+      expect(cookie).toMatch(/Domain=bioregionalpassport\.org/);
+    });
+    it('scopes the cookie to the platform domain on the platform host, and host-only elsewhere', async () => {
+      const platform = await call(svc, 'POST', '/session', { body: {}, url: 'https://bioregionalpassport.org/api/svc', headers: { 'x-pod': 'boulder' } });
+      expect(platform.headers.get('set-cookie')).toMatch(/Domain=bioregionalpassport\.org/);
+      const local = await call(svc, 'POST', '/session', { body: {}, url: 'http://boulder.localhost:3000/api/svc' });
+      expect(local.status).toBe(201);
+      expect(local.headers.get('set-cookie')).not.toMatch(/Domain=/);
     });
     it('also sets it for POST /session/visitor, and never for other paths', async () => {
       expect((await call(svc, 'POST', '/session/visitor', { body: {} })).headers.get('set-cookie')).toContain('passport_session=visitor.token');
@@ -207,6 +216,11 @@ describe('mountService (pod scope)', () => {
       const r = await call(vta, 'DELETE', '/session');
       expect(r.status).toBe(200);
       expect(r.headers.get('set-cookie')).toMatch(/passport_session=;.*Max-Age=0/);
+      // Clears the platform-wide cookie and any older host-only one.
+      const cleared = r.headers.getSetCookie();
+      expect(cleared).toHaveLength(2);
+      expect(cleared[0]).toMatch(/Domain=bioregionalpassport\.org/);
+      expect(cleared[1]).not.toMatch(/Domain=/);
       // Without the session endpoint, DELETE falls through to the route table (POST-only here).
       expect((await call(svc, 'DELETE', '/session')).status).toBe(405);
     });
