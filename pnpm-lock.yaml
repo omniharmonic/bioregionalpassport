@@ -26,6 +26,9 @@ importers:
       '@passport/appview':
         specifier: workspace:*
         version: link:../../services/appview
+      '@passport/cc-gateway':
+        specifier: workspace:*
+        version: link:../../services/cc-gateway
       '@passport/control-plane':
         specifier: workspace:*
         version: link:../../services/control-plane
@@ -38,6 +41,12 @@ importers:
       '@passport/pod-vta':
         specifier: workspace:*
         version: link:../../services/pod-vta
+      '@passport/pos-adapter':
+        specifier: workspace:*
+        version: link:../../services/pos-adapter
+      '@passport/round':
+        specifier: workspace:*
+        version: link:../../services/round
       '@passport/service-kit':
         specifier: workspace:*
         version: link:../../packages/service-kit
@@ -56,6 +65,9 @@ importers:
       '@passport/vocab':
         specifier: workspace:*
         version: link:../../packages/vocab
+      dexie:
+        specifier: ^4.4.6
+        version: 4.4.6
       next:
         specifier: ^16.3.6
         version: 16.3.6(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -1419,6 +1431,9 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
+  dexie@4.4.6:
+    resolution: {integrity: sha512-hJP/BO6mjB+tX6hToIO1kmxYLNmun90wYbfcoAoLpKEyDYal/k33dg0TAfoUe2TDsbbLoVIzljJ3BN2UbR5EOg==}
+
   dijkstrajs@1.0.3:
     resolution: {integrity: sha512-qiSlmBq9+BCdCA/L46dw8Uy93mloxsPSbwnm5yrKn2vMPiy8KyAskTF6zuV/j5BMsmOGZDPs7KjU+mjb670kfA==}
 
@@ -2680,6 +2695,8 @@ snapshots:
   dequal@2.0.3: {}
 
   detect-libc@2.1.2: {}
+
+  dexie@4.4.6: {}
 
   dijkstrajs@1.0.3: {}
 
