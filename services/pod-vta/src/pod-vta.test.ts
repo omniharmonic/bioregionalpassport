@@ -257,7 +257,7 @@ describe('pod VTA — ceremony back half', () => {
     expect(grant.issuer).toBe(POD_DID);
     expect(grant.credentialSubject.id).toBe(alice.did);
     expect(grant.credentialSubject['placeIds']).toEqual(['huc12:101900050301']);
-    expect(Date.parse(grant.validUntil!) - Date.parse(grant.validFrom)).toBe(90 * DAY);
+    expect(Date.parse(grant.validUntil!) - Date.parse(grant.validFrom)).toBe(90 * DAY - 60_000);
 
     const again = await apply(alice, vwc, [edge.vrcA]);
     expect(again.status).toBe(200);
@@ -714,6 +714,22 @@ describe('pod VTA — in-process smoke', () => {
     expect(await counts()).toEqual(before);
     const list = await call('GET', '/events');
     expect(list.body.events.some((e: any) => e.id.startsWith('smoke-'))).toBe(false);
+  });
+
+  it('ceremonyBackHalf passes with a 90-day policy on a real, advancing clock (verifyPod regression)', async () => {
+    const p90: TrustPolicy = { ...policy, grantValidityDays: 90, vacValidityDays: 90 };
+    let t = NOW.getTime();
+    // Every clock read moves 250 ms on, like `() => new Date()` in verifyPod.
+    const res = await withPod(db, SLUG, (tx) => ceremonyBackHalf({ ...ctxFor(tx, NOW, p90), now: () => new Date((t += 250)) }, { signer: podSigner, resolver }));
+    expect(res.ok).toBe(true);
+    for (const vc of [res.grant, res.ack, res.vacs[0]!]) {
+      expect(Date.parse(vc.validUntil!) - Date.parse(vc.validFrom)).toBeLessThanOrEqual(90 * DAY - 60_000);
+    }
+    // Policies above the ceiling are clamped rather than rejected.
+    const p120: TrustPolicy = { ...policy, grantValidityDays: 120, vacValidityDays: 120 };
+    const clamped = await withPod(db, SLUG, (tx) => ceremonyBackHalf({ ...ctxFor(tx, NOW, p120), now: () => new Date((t += 250)) }, { signer: podSigner, resolver }));
+    expect(Date.parse(clamped.grant.validUntil!) - Date.parse(clamped.grant.validFrom)).toBe(90 * DAY - 60_000);
+    expect(Date.parse(clamped.vacs[0]!.validUntil!) - Date.parse(clamped.vacs[0]!.validFrom)).toBe(90 * DAY - 60_000);
   });
 
   it('ceremonyBackHalf accepts an explicit convener session, applicant key and event, and keeps pre-existing rows', async () => {

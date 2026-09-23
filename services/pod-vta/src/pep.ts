@@ -4,7 +4,7 @@ import { base64urlnopad } from '@scure/base';
 import { ServiceError } from '@passport/service-kit';
 import { tierDefaultActions, tierRank, TIERS, type Tier } from '@passport/vocab';
 import type { PodVtaDeps, VtaContext } from './types.js';
-import { addDays, DAY_MS, json, toIso, toMs } from './util.js';
+import { DAY_MS, json, toIso, toMs, validityWindow } from './util.js';
 
 /** Published path of the VAC revocation list (relative to the pod's VTA mount). */
 export const VAC_STATUS_LIST = 'vac';
@@ -55,9 +55,7 @@ export async function issueAuthorities(
   const actions = tierDefaultActions(tier);
   if (!actions.length) return { vacs: [], explanation: [...explanation, `Tier ${tier} carries no authorities, so none were issued.`] };
   const now = ctx.now();
-  const validFrom = now.toISOString();
-  const days = Math.min(ctx.policy.vacValidityDays, MAX_VALIDITY_DAYS.authority);
-  const validUntil = addDays(now, days);
+  const { validFrom, validUntil } = validityWindow(now, ctx.policy.vacValidityDays, MAX_VALIDITY_DAYS.authority);
   const policyVersion = ctx.policy.version;
   const lines = [...explanation, `Issued tier ${tier} authorities (${actions.length} actions) valid until ${validUntil.slice(0, 10)}.`];
 

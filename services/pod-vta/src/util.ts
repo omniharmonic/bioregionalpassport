@@ -39,3 +39,16 @@ export function requireMember(ctx: VtaContext, req: RouteRequest): SessionClaims
   }
   return req.session;
 }
+
+/** Safety margin kept below a B3 validity ceiling so clock drift can never trip a builder's ceiling check. */
+export const VALIDITY_SAFETY_MS = 60_000;
+
+/**
+ * `{ validFrom, validUntil }` from ONE instant: `min(days, ceilingDays)` days minus one minute of safety.
+ * Always use this for grants and VACs so `validUntil − validFrom` stays under the ceiling.
+ */
+export function validityWindow(now: Date, days: number, ceilingDays: number): { validFrom: string; validUntil: string } {
+  const span = Math.min(days, ceilingDays) * DAY_MS - VALIDITY_SAFETY_MS;
+  if (!(span > 0)) throw new Error('Validity must be positive.');
+  return { validFrom: now.toISOString(), validUntil: new Date(now.getTime() + span).toISOString() };
+}

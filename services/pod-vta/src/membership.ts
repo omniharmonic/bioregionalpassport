@@ -12,7 +12,7 @@ import { tierRank, TIERS, type Tier } from '@passport/vocab';
 import { canWitnessAt, getEventRow } from './events.js';
 import { issueAuthorities, setEffective } from './pep.js';
 import type { PodVtaDeps, VtaContext } from './types.js';
-import { addDays, bad, isObject, json, toIso, toMs } from './util.js';
+import { bad, isObject, json, toIso, toMs, validityWindow } from './util.js';
 
 const WITNESS_INVALID = 'Admission needs a witness credential from one of this pod\'s attestation events.';
 
@@ -169,15 +169,15 @@ export async function applyMembership(
     if (grant.validUntil && Date.parse(grant.validUntil) > now.getTime()) return { grant, existing: true };
   }
 
-  const days = Math.min(ctx.policy.grantValidityDays, MAX_VALIDITY_DAYS.membership);
+  const window = validityWindow(now, ctx.policy.grantValidityDays, MAX_VALIDITY_DAYS.membership);
   const unsigned = buildMembershipGrant({
     pod: ctx.podDid,
     member: holder,
     bioregion: ctx.slug,
     placeIds: [witness.placeId ?? ctx.manifest.place.bioregionPolygon ?? `bioregion:${ctx.slug}`],
     governance: ctx.manifest.governance.url,
-    validFrom: now.toISOString(),
-    validUntil: addDays(now, days),
+    validFrom: window.validFrom,
+    validUntil: window.validUntil,
   });
   const grant = deps.podSigner.sign(unsigned, { created: now.toISOString() });
   const grantDigest = digestMultibase(grant);

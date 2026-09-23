@@ -143,12 +143,15 @@ export async function ceremonyBackHalf(ctx: VtaContext, deps: CeremonyDeps, opts
     const presentation = createPresentation([vrc], applicant, binding);
     const { grant } = await applyMembership(ctx, d, { vwc, presentation }, binding);
 
+
     const ack = signDocument(
       buildMembershipAck({
         member: applicant.did,
         pod: ctx.podDid,
         grantDigest: digestMultibase(grant),
-        validFrom: now.toISOString(),
+        // Same window as the grant: a later clock read for validFrom would never be earlier than the grant's,
+        // but an earlier one (the smoke's start time) would stretch the ack past the 90-day ceiling.
+        validFrom: grant.validFrom,
         validUntil: grant.validUntil!,
       }),
       applicant,
