@@ -11,7 +11,7 @@ import {
   type VerifiableCredential,
 } from '@passport/credential-core';
 import type { SessionClaims } from '@passport/service-kit';
-import { tierDefaultActions } from '@passport/vocab';
+import { tierDefaultActions, tierRank, TIERS, type Tier } from '@passport/vocab';
 import { podDomain } from './challenges.js';
 import { createEvent, witnessEdge } from './events.js';
 import { acknowledgeMembership, applyMembership } from './membership.js';
@@ -35,21 +35,24 @@ function signerOf(deps: SignerDeps): PodSigner {
  * T3 VAC (`event:convene`, `vwc:issue`, `pep:review`, `registry:propose`, plus every T1/T2 action). Never
  * mount this as a member-facing route; the control plane / operator console calls it.
  */
-export async function bootstrapSteward(ctx: VtaContext, deps: SignerDeps, did: string): Promise<{ member: { did: string; tier: 'T3' } } & IssuedAuthorities> {
+export async function bootstrapSteward(ctx: VtaContext, deps: SignerDeps, did: string): Promise<{ member: { did: string; tier: Tier } } & IssuedAuthorities> {
   if (typeof did !== 'string' || !did.startsWith('did:')) throw new Error('bootstrapSteward needs a DID.');
-  // Governance write: `tier` is the governance record; the PEP's effective tier follows.
+  // Governance write: `tier` is the governance record; the PEP's effective tier follows. Never lowers a higher
+  // governance tier (an existing T4 anchor stays T4).
   const [prior] = await ctx.db.query<{ tier: string }>('SELECT tier FROM members WHERE did = $1', [did]);
+  const priorTier: Tier | undefined = prior && (TIERS as readonly string[]).includes(prior.tier) ? (prior.tier as Tier) : undefined;
+  const tier: Tier = priorTier && tierRank(priorTier) > tierRank('T3') ? priorTier : 'T3';
   await ctx.db.query(
-    `INSERT INTO members (did, tier, joined_at) VALUES ($1, 'T3', $2)
-     ON CONFLICT (did) DO UPDATE SET tier = 'T3'`,
-    [did, ctx.now().toISOString()],
+    `INSERT INTO members (did, tier, joined_at) VALUES ($1, $3, $2)
+     ON CONFLICT (did) DO UPDATE SET tier = $3`,
+    [did, ctx.now().toISOString(), tier],
   );
-  if (prior?.tier !== 'T3') await logGovernance(ctx, did, prior?.tier ?? null, 'T3', 'operator', 'First steward bootstrap (B4 launch checklist).');
-  const issued = await issueAuthorities(ctx, { podSigner: signerOf(deps) }, did, 'T3', [
+  if (prior?.tier !== tier) await logGovernance(ctx, did, prior?.tier ?? null, tier, 'operator', 'First steward bootstrap (B4 launch checklist).');
+  const issued = await issueAuthorities(ctx, { podSigner: signerOf(deps) }, did, tier, [
     'First steward bootstrap by the pod operator (B4 launch checklist).',
   ]);
-  await setEffective(ctx, did, 'T3', issued.vacs[0]?.validUntil ?? null);
-  return { member: { did, tier: 'T3' }, ...issued };
+  await setEffective(ctx, did, tier, issued.vacs[0]?.validUntil ?? null);
+  return { member: { did, tier }, ...issued };
 }
 
 export interface CeremonyOptions {

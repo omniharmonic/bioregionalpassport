@@ -243,6 +243,19 @@ describe('pod VTA — ceremony back half', () => {
     expect((await verifyDocument(vwc as any, resolver)).ok).toBe(true);
   });
 
+  it('witnesses a relationship at most once per pod (same event or another event)', async () => {
+    const same = await call('POST', `/events/${event.id}/witness`, { session: stewardSession, body: { vrcA: edge.vrcB, vrcB: edge.vrcA, evidence: 'liveness' } });
+    expect(same.status).toBe(409);
+    expect(same.body.code).toBe('ALREADY_WITNESSED');
+    expect(same.body.message).toBe('This relationship has already been witnessed in this pod.');
+    const other = await newEvent(stewardSession);
+    const again = await call('POST', `/events/${other.id}/witness`, { session: stewardSession, body: { vrcA: edge.vrcA, vrcB: edge.vrcB, evidence: 'same-event' } });
+    expect(again.status).toBe(409);
+    expect(again.body.code).toBe('ALREADY_WITNESSED');
+    const rows = await run((ctx) => ctx.db.query('SELECT count(*)::int AS n FROM witness_refs WHERE pair_digest = $1', [edge.edgeDigest]));
+    expect(rows[0].n).toBe(1);
+  });
+
   it('refuses the VWC to three unrelated DIDs replaying it (EDGE_NOT_YOURS)', async () => {
     for (const _ of [1, 2, 3]) {
       const stranger = generateKeyPair();
@@ -551,6 +564,18 @@ describe('pod VTA — ceremony back half', () => {
     expect(raise.body.code).toBe('TIER_PROTECTED');
     const noReason = await call('POST', `/steward/members/${encodeURIComponent(alice.did)}/tier`, { session: stewardSession, body: { tier: 'T1' } });
     expect(noReason.status).toBe(400);
+  });
+
+  it('bootstrapSteward never lowers an existing T4 anchor', async () => {
+    const anchor = generateKeyPair();
+    await run(async (ctx) => {
+      await ctx.db.query(`INSERT INTO members (did, tier) VALUES ($1, 'T1')`, [anchor.did]);
+      await recordGovernanceTier(ctx, anchor.did, 'T4', 'operator', 'named in governance');
+    });
+    const out = await run((ctx) => bootstrapSteward(ctx, deps, anchor.did));
+    expect(out.member.tier).toBe('T4');
+    expect(out.vacs[0]!.credentialSubject['tier']).toBe('T4');
+    expect(await memberRow(anchor.did)).toMatchObject({ tier: 'T4', effective_tier: 'T4' });
   });
 
   it('a steward demotion of a T2 member is logged with who, why and the previous tier', async () => {

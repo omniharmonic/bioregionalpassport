@@ -8,6 +8,8 @@ import { addDays, bad, isObject, json, toIso, toMs } from './util.js';
 export const WITNESS_VALIDITY_DAYS = 365;
 export const SMOKE_PREFIX = 'smoke-';
 
+const alreadyWitnessed = () => new ServiceError(409, 'ALREADY_WITNESSED', 'This relationship has already been witnessed in this pod.');
+
 /** An event that may witness: a real attestation event, or the provisioning smoke's own event. */
 export const canWitnessAt = (row: { id: string; attestation: boolean; task_digest: string | null }): boolean =>
   !!row.task_digest && (row.attestation || row.id.startsWith(SMOKE_PREFIX));
@@ -191,6 +193,9 @@ export async function witnessEdge(
   if (!canWitnessAt(row)) throw new ServiceError(409, 'NOT_ATTESTATION_EVENT', 'This event is not an attestation event, so it cannot witness relationships.');
   const conveners = json<string[]>(row.conveners) ?? [];
   if (!conveners.includes(convener)) throw new ServiceError(403, 'NOT_CONVENER', 'Only a convener of this event can witness at it.');
+  // A relationship is witnessed at most once per pod (else the index would count it as several edges/events).
+  const seen = await ctx.db.query('SELECT 1 FROM witness_refs WHERE pair_digest = $1', [pair.digest]);
+  if (seen.length) throw alreadyWitnessed();
   const now = ctx.now();
   const t = now.getTime();
   if (t < toMs(row.starts_at) - WITNESS_EARLY_MS || t > toMs(row.ends_at) + WITNESS_LATE_MS) {
@@ -209,11 +214,12 @@ export async function witnessEdge(
   unsigned.credentialSubject['witnessedBy'] = convener;
   unsigned.credentialSubject['edgeParties'] = [edgeParties[0], edgeParties[1]];
   const vwc = deps.podSigner.sign(unsigned, { created: now.toISOString() });
-  await ctx.db.query('INSERT INTO witness_refs (digest, event_id, convener_did, created_at) VALUES ($1, $2, $3, $4)', [
-    digestMultibase(vwc),
-    row.id,
-    convener,
-    now.toISOString(),
-  ]);
+  // The unique index on pair_digest (migration 0009_witness_pair.sql) also closes the race between two concurrent requests.
+  const inserted = await ctx.db.query(
+    `INSERT INTO witness_refs (digest, event_id, convener_did, created_at, pair_digest) VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT DO NOTHING RETURNING digest`,
+    [digestMultibase(vwc), row.id, convener, now.toISOString(), pair.digest],
+  );
+  if (!inserted.length) throw alreadyWitnessed();
   return { vwc };
 }
