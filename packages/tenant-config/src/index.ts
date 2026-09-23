@@ -170,7 +170,8 @@ const TierRequirementSchema = z.object({
   requires: z.array(z.string()),
 });
 
-const PolicyTierSchema = z.enum(['T1', 'T2', 'T3', 'T4']);
+/** Witnesses are Trusted members or above: T1 members never hold `vwc:issue`. */
+const WitnessTierSchema = z.enum(['T2', 'T3', 'T4']);
 
 /**
  * Admission rules (peer witnessing, Task 21). Optional as a whole: pods
@@ -179,16 +180,17 @@ const PolicyTierSchema = z.enum(['T1', 'T2', 'T3', 'T4']);
  * witness-tier floor).
  */
 export const AdmissionPolicySchema = z.object({
-  /** Lowest tier (at witness time) whose witness admits a newcomer. T2 also grants `vwc:issue` to T2 members. */
-  witnessTier: PolicyTierSchema.optional(),
+  /** Lowest tier (at witness time, T2–T4) whose witness admits a newcomer. T2 also grants `vwc:issue` to T2 members. */
+  witnessTier: WitnessTierSchema.optional(),
   /** Any Trusted member may witness a relationship on the spot; T2 `distinctEvents>=N` also counts distinct witnesses. */
   peerWitnessing: z.boolean().default(true),
-  /** Admission by vouches alone (no witnessed meeting); off unless a pod turns it on. */
+  /** Admission by vouches alone (no witnessed meeting). NOT YET ENFORCED: no service reads it; reserved. */
   vouchOnly: z
     .object({
       enabled: z.boolean().default(false),
       endorsements: z.number().int().positive().default(3),
     })
+    .describe('Admission by vouches alone. Not yet enforced by any service; reserved for a later task.')
     .optional(),
 });
 

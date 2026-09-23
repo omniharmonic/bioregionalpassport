@@ -10,7 +10,7 @@ describe('security headers', () => {
         "font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; " +
         "connect-src 'self' https://*.bioregionalpassport.org https://bioregionalpassport.org " +
         'https://tiles.openfreemap.org https://tile.openstreetmap.org; ' +
-        "worker-src 'self' blob:; child-src blob:; " +
+        "worker-src 'self' blob:; child-src blob:; frame-src 'none'; " +
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     );
   });
@@ -35,6 +35,7 @@ describe('security headers', () => {
     expect(d.get('connect-src')).toEqual(expect.arrayContaining(['https://tiles.openfreemap.org', 'https://tile.openstreetmap.org']));
     expect(d.get('worker-src')).toEqual(["'self'", 'blob:']);
     expect(d.get('child-src')).toEqual(['blob:']);
+    expect(d.get('frame-src')).toEqual(["'none'"]);
     expect(d.get('img-src')).toContain('https:');
   });
 

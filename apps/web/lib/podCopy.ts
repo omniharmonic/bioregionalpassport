@@ -95,7 +95,5 @@ export function describeWitnessing(manifest: BioregionManifest, policy: Pick<Tru
   const admission = policy.admission;
   const tier = admission?.witnessTier;
   if (!tier || admission?.peerWitnessing === false) return null;
-  // Only T2 and above hold `vwc:issue`; a T1 floor still means T2 in practice.
-  const floor = tier === 'T1' ? 'T2' : tier;
-  return `Any member at ${tierName(manifest, floor)} standing or above can witness two neighbors' relationship in person, at a gathering or on the spot.`;
+  return `Any member at ${tierName(manifest, tier)} standing or above can witness two neighbors' relationship in person, at a gathering or on the spot.`;
 }

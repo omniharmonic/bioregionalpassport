@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Ceremony, parseInvite, parseWitnessInvite, WITNESS_GOAL } from './ceremony.js';
 import { PodClient } from './client.js';
 import { acceptMembership, applyForMembership } from './membership.js';
-import { channelFor, PodError, vacActions } from './util.js';
+import { channelFor, matchCode, PodError, vacActions } from './util.js';
 import { createWallet, type Wallet } from './wallet.js';
 import { createHarness, POD_DID, SLUG, type Harness } from './test/harness.js';
 
@@ -121,6 +121,42 @@ describe('peer witnessing against the real pod VTA', () => {
     const err = await alice.client.witnessMeeting(met.vrcOut, met.vrcIn).catch((e) => e);
     expect(err).toBeInstanceOf(PodError);
     expect(err.status).toBe(403);
+  });
+
+  it('asking a second witness never orphans the first; the other neighbor gets the result via the relationship', async () => {
+    const dana = await phone(); // witness 1
+    const gus = await phone(); // witness 2
+    const alice = await phone();
+    const bob = await phone(); // never scans any witness code
+    await trusted(dana);
+    await trusted(gus);
+    const met = await meet(alice, bob);
+    const ch1 = await dana.ceremony.hostWitness();
+    const ch2 = await gus.ceremony.hostWitness();
+    await alice.ceremony.requestPeerWitness(ch1.inviteJson, bob.persona.did);
+    await alice.ceremony.requestPeerWitness(ch2.inviteJson, bob.persona.did);
+    expect((await alice.wallet.contact(bob.persona.did))!.witnessChannels).toEqual([ch1.channel, ch2.channel]);
+
+    // The matching code is the same on the neighbor's waiting card and on each witness's card.
+    const [req1] = await dana.ceremony.listPeerWitnessRequests(ch1);
+    const [req2] = await gus.ceremony.listPeerWitnessRequests(ch2);
+    const aliceCode = matchCode((await alice.wallet.contact(bob.persona.did))!.edgeDigest!);
+    expect(aliceCode).toMatch(/^[A-HJ-NP-Z2-9]{6}$/);
+    expect(matchCode(req1!.edgeDigest)).toBe(aliceCode);
+    expect(matchCode(req2!.edgeDigest)).toBe(aliceCode);
+    expect(matchCode(met.edgeDigest)).toBe(aliceCode);
+
+    // Witness 1 taps after Alice already asked witness 2: Alice still receives it.
+    const out = await dana.ceremony.witnessPeer(dana.client, ch1, req1!);
+    expect(digestMultibase((await alice.ceremony.pollPeerWitnessResult(bob.persona.did))!)).toBe(digestMultibase(out.vwc));
+    // Alice forwarded it: witness 2's queue closes, and Bob (who never scanned) gets it over the relationship channel.
+    expect(await gus.ceremony.listPeerWitnessRequests(ch2)).toEqual([]);
+    expect(digestMultibase((await bob.ceremony.pollPeerWitnessResult(alice.persona.did))!)).toBe(digestMultibase(out.vwc));
+    // Had witness 2 tapped first-come anyway, the pod answers 409 (a pair is witnessed once per pod).
+    const late = await gus.client.witnessMeeting(req2!.vrcA, req2!.vrcB).catch((e) => e);
+    expect(late).toMatchObject({ status: 409, code: 'ALREADY_WITNESSED' });
+    const grant = await applyForMembership(bob.wallet, bob.client, alice.persona.did);
+    expect(grant.credentialSubject.id).toBe(bob.persona.did);
   });
 
   it('refuses a witness who is one of the two people', async () => {

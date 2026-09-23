@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Button, Card, EmptyState, Explain, Field, Input, Notice, PageHeader, QrCode } from '@passport/ui-kit';
-import { MEETING_TASK_CONTEXT, withSession, type ContactRow, type WitnessChannel, type WitnessRequest } from '@passport/pod-client';
+import { PodError, matchCode, withSession, type ContactRow, type WitnessChannel, type WitnessRequest } from '@passport/pod-client';
 import type { VerifiableCredential } from '@passport/credential-core';
 import { Consent } from '../_components/Consent';
 import { WitnessedList } from '../_components/WitnessedList';
@@ -71,63 +71,97 @@ export default function WitnessPage() {
   );
 }
 
+/** A new witness code every 10 minutes while the page is open; codes from the last hour are still polled. */
+const ROTATE_MS = 10 * 60_000;
+const KEEP_CHANNELS = 6;
+
+interface Pending {
+  req: WitnessRequest;
+  session: WitnessChannel;
+}
+
 /** The witness's side: a channel QR, the pairs that asked on it, one tap each. */
 function WitnessPanel() {
   const w = useWalletState();
-  const [session, setSession] = useState<WitnessChannel | null>(null);
-  const [requests, setRequests] = useState<WitnessRequest[]>([]);
+  const [sessions, setSessions] = useState<WitnessChannel[]>([]);
+  const [pending, setPending] = useState<Pending[]>([]);
   const [placeName, setPlaceName] = useState('');
   const [done, setDone] = useState<string[]>([]);
+  const [dropped, setDropped] = useState<Set<string>>(new Set());
+  const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const started = useRef(false);
+  const current = sessions[sessions.length - 1];
 
   useEffect(() => {
-    if (session || started.current || !w.slug) return;
-    started.current = true;
-    (async () => {
+    if (!w.slug) return;
+    let live = true;
+    const open = async () => {
       try {
         const ceremony = await w.ceremonyFor();
-        setSession(await ceremony.hostWitness());
+        const next = await ceremony.hostWitness();
+        if (live) setSessions((prev) => [...prev, next].slice(-KEEP_CHANNELS));
       } catch (e) {
-        setError(e);
-      } finally {
-        started.current = false;
+        if (live) setError(e);
       }
-    })();
-  }, [session, w]);
+    };
+    void open();
+    const t = setInterval(() => void open(), ROTATE_MS);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [w.slug]);
 
-  usePoll(
-    async () => {
-      if (!session) return;
-      const ceremony = await w.ceremonyFor();
-      setRequests(await ceremony.listPeerWitnessRequests(session));
-    },
-    3000,
-    !!session,
-  );
+  const load = async () => {
+    const ceremony = await w.ceremonyFor();
+    const all: Pending[] = [];
+    const seen = new Set<string>();
+    for (const session of [...sessions].reverse()) {
+      for (const req of await ceremony.listPeerWitnessRequests(session)) {
+        if (seen.has(req.edgeDigest)) continue;
+        seen.add(req.edgeDigest);
+        all.push({ req, session });
+      }
+    }
+    setPending(all);
+  };
+  usePoll(load, 3000, sessions.length > 0);
 
-  const witness = useAction(async (req: WitnessRequest) => {
-    if (!session) return;
+  const witness = useAction(async ({ req, session }: Pending) => {
     const client = await w.clientFor();
     const ceremony = await w.ceremonyFor();
     const name = placeName.trim();
-    await withSession(w.wallet!, client, () => ceremony.witnessPeer(client, session, req, name ? { place: { name } } : {}), ['vwc:issue']);
-    setDone((d) => [...d, req.edgeDigest]);
-    setRequests(await ceremony.listPeerWitnessRequests(session));
+    setNote(null);
+    try {
+      await withSession(w.wallet!, client, () => ceremony.witnessPeer(client, session, req, name ? { place: { name } } : {}), ['vwc:issue']);
+      setDone((d) => [...d, req.edgeDigest]);
+    } catch (e) {
+      if (e instanceof PodError && e.code === 'ALREADY_WITNESSED') {
+        // Someone else witnessed this pair first; the pod keeps one witness per pair.
+        setDropped((d) => new Set(d).add(req.edgeDigest));
+        setNote(`Another witness already confirmed the pair with code ${matchCode(req.edgeDigest)}, so there is nothing left for you to do.`);
+        return;
+      }
+      throw e;
+    }
+    await load();
   });
+
+  const shown = pending.filter((p) => !dropped.has(p.req.edgeDigest));
 
   return (
     <Section title="Your witness code" aside={done.length ? <span className="text-sm muted">{done.length === 1 ? '1 relationship witnessed' : `${done.length} relationships witnessed`}</span> : undefined}>
       <ErrorNotice error={error} />
       <Card className="grid justify-items-center gap-4 text-center">
-        {session ? (
+        {current ? (
           <>
-            <QrCode value={session.inviteJson} size={260} />
-            <p className="text-sm">After the two of them have met, each scans this code from “Ask a neighbor to witness”.</p>
+            <QrCode value={current.inviteJson} size={260} />
+            <p className="text-sm">After the two of them have met, each scans this code from “Ask a neighbor to witness”. It changes every 10 minutes.</p>
             <details className="w-full text-left text-sm">
               <summary className="cursor-pointer">Their camera won’t work?</summary>
               <p className="mt-2 muted">Send them this code to paste instead:</p>
-              <textarea readOnly className="mt-2 w-full rounded-2xl p-2 text-xs" rows={4} value={session.inviteJson} onFocus={(e) => e.currentTarget.select()} />
+              <textarea readOnly className="mt-2 w-full rounded-2xl p-2 text-xs" rows={4} value={current.inviteJson} onFocus={(e) => e.currentTarget.select()} />
             </details>
           </>
         ) : (
@@ -137,27 +171,34 @@ function WitnessPanel() {
         )}
       </Card>
 
-      <Field label="Where are you? (optional)" htmlFor="wt-place" hint="Recorded with the meeting; only stewards and the two people see it.">
+      <Field label="Where are you? (optional)" htmlFor="wt-place" hint="Recorded with the meeting; only stewards, you, and the two people see it.">
         <Input id="wt-place" value={placeName} onChange={(e) => setPlaceName(e.target.value)} placeholder="e.g. Saturday farmers market" />
       </Field>
 
+      {note ? <Notice kind="info">{note}</Notice> : null}
       <ErrorNotice error={witness.error} />
-      {session && requests.length === 0 ? (
+      {current && shown.length === 0 ? (
         <p role="status" className="text-sm muted">
           No one has asked yet. Pairs appear here as they scan your code.
         </p>
       ) : (
         <ul className="grid gap-3">
-          {requests.map((r) => (
-            <li key={r.edgeDigest}>
-              <Card className="flex flex-wrap items-center justify-between gap-3 p-4">
-                <span className="text-sm">
-                  <Did did={r.vrcA.issuer} /> and <Did did={r.vrcB.issuer} />
-                  <span className="block text-xs muted">asked {formatDate(r.createdAt, true)}</span>
-                </span>
-                <Button onClick={() => void witness.run(r)} disabled={witness.busy}>
-                  I saw these two people together
-                </Button>
+          {shown.map((p) => (
+            <li key={p.req.edgeDigest}>
+              <Card className="grid gap-3 p-4">
+                <div className="flex flex-wrap items-baseline justify-between gap-3">
+                  <MatchCode edgeDigest={p.req.edgeDigest} />
+                  <span className="text-sm">
+                    <Did did={p.req.vrcA.issuer} /> and <Did did={p.req.vrcB.issuer} />
+                    <span className="block text-xs muted">asked {formatDate(p.req.createdAt, true)}</span>
+                  </span>
+                </div>
+                <p className="text-sm">Tap only if this code matches both of their phones.</p>
+                <div>
+                  <Button onClick={() => void witness.run(p)} disabled={witness.busy}>
+                    I saw these two people together
+                  </Button>
+                </div>
               </Card>
             </li>
           ))}
@@ -171,6 +212,16 @@ function WitnessPanel() {
   );
 }
 
+/** The relationship's matching code, large, so the witness and both neighbors can compare it at a glance. */
+function MatchCode({ edgeDigest }: { edgeDigest: string }) {
+  const code = matchCode(edgeDigest);
+  return (
+    <span aria-label={`Matching code ${code.split('').join(' ')}`} className="font-mono text-3xl font-semibold tracking-widest">
+      {code}
+    </span>
+  );
+}
+
 /** The two neighbors' side: pick the relationship, scan the witness's code, wait for the result. */
 function AskPanel({ contacts, onChanged }: { contacts: ContactRow[]; onChanged: () => Promise<void> }) {
   const w = useWalletState();
@@ -178,7 +229,9 @@ function AskPanel({ contacts, onChanged }: { contacts: ContactRow[]; onChanged: 
   const [scanning, setScanning] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  const waiting = contacts.filter((c) => !c.vwc && c.witnessRequested?.event === MEETING_TASK_CONTEXT);
+  const waiting = contacts.filter((c) => !c.vwc && (c.witnessChannels?.length ?? 0) > 0);
+  // The other neighbor may never have scanned: their result arrives forwarded on the relationship channel.
+  const listening = contacts.filter((c) => !c.vwc && c.vrcIn && c.channel);
   // Waiting relationships stay pickable, so a neighbor can ask a different witness if the first one left.
   const candidates = contacts.filter((c) => !c.vwc && c.vrcOut && c.vrcIn);
   const chosen = picked || candidates[0]?.did || '';
@@ -195,15 +248,15 @@ function AskPanel({ contacts, onChanged }: { contacts: ContactRow[]; onChanged: 
     async () => {
       const ceremony = await w.ceremonyFor();
       let got = false;
-      for (const c of waiting) if (await ceremony.pollPeerWitnessResult(c.did)) got = true;
+      for (const c of listening) if (await ceremony.pollPeerWitnessResult(c.did)) got = true;
       if (got) {
         setNote('Witnessed. You can now use this relationship below.');
         await onChanged();
         await w.reload();
       }
     },
-    3000,
-    waiting.length > 0,
+    waiting.length > 0 ? 3000 : 10_000,
+    listening.length > 0,
   );
 
   return (
@@ -246,16 +299,20 @@ function AskPanel({ contacts, onChanged }: { contacts: ContactRow[]; onChanged: 
           <p role="status" className="text-sm">
             Waiting for your witness to confirm {waiting.length === 1 ? 'your relationship' : `${waiting.length} relationships`}…
           </p>
-          <ul className="text-sm muted">
+          <p className="text-sm">Show your witness this code; it must match the one on their screen and on your neighbor’s phone.</p>
+          <ul className="grid gap-3 text-sm muted">
             {waiting.map((c) => (
-              <li key={c.did}>
-                {c.name ?? 'A neighbor'}
-                {c.witnessRequested?.witness ? (
-                  <>
-                    {' '}
-                    — witness <Did did={c.witnessRequested.witness} />
-                  </>
-                ) : null}
+              <li key={c.did} className="grid gap-1">
+                {c.edgeDigest ? <MatchCode edgeDigest={c.edgeDigest} /> : null}
+                <span>
+                  {c.name ?? 'A neighbor'}
+                  {c.witnessRequested?.witness ? (
+                    <>
+                      {' '}
+                      — witness <Did did={c.witnessRequested.witness} />
+                    </>
+                  ) : null}
+                </span>
               </li>
             ))}
           </ul>

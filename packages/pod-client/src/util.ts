@@ -40,6 +40,24 @@ export const channelFor = (challenge: string): string => sha256Base58(challenge)
 export const eventChannel = (event: { id: string; taskDigest?: string | null }): string =>
   sha256Base58(`org.bioregion.witness:${event.id}:${event.taskDigest ?? ''}`);
 
+const MATCH_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+/**
+ * A 6-character matching code for a relationship (`edgeDigest`), shown large on both neighbors' phones and on
+ * the witness's card, so the witness taps the pair actually in front of them. 30 bits of sha256, 32 symbols
+ * without look-alikes (no I, O, 0, 1).
+ */
+export function matchCode(edgeDigest: string): string {
+  const h = sha256(utf8(`org.bioregion.match:${edgeDigest}`));
+  let bits = (h[0]! << 24) | (h[1]! << 16) | (h[2]! << 8) | h[3]!;
+  let out = '';
+  for (let i = 0; i < 6; i++) {
+    out += MATCH_ALPHABET[(bits >>> 27) & 31];
+    bits <<= 5;
+  }
+  return out;
+}
+
 /** `did:key:z6MkhaXg…pQ2w` → `z6Mkha…pQ2w`; readable, never the whole identifier. */
 export function abbreviateDid(did: string | undefined | null): string {
   if (!did) return '';

@@ -158,6 +158,10 @@ describe('ceremony over a relay', () => {
     const channel = await cw.hostWitness();
     expect(() => parseWitnessInvite(s.inviteJson)).toThrow('That is not a witness code');
     await expect(ca.join(channel.inviteJson)).rejects.toThrow('This is a witness code');
+    // A request whose halves are not genuinely signed is never listed.
+    const tampered = { ...met.vrcIn, credentialSubject: { ...met.vrcIn.credentialSubject, formedAt: '2020-01-01T00:00:00Z' } };
+    await relay.post(channel.channel, 'x', { type: 'org.bioregion.witness.request', createdAt: new Date().toISOString(), seq: 1, edgeDigest: pairDigest(met.vrcOut, tampered), taskContext: 'meeting', requester: 'x', vrcA: met.vrcOut, vrcB: tampered });
+    expect(await cw.listPeerWitnessRequests(channel)).toHaveLength(0);
     await ca.requestPeerWitness(channel.inviteJson, bDid);
     await ca.requestPeerWitness(channel.inviteJson, bDid); // a repeat collapses to one request
     expect(await cw.listPeerWitnessRequests(channel)).toHaveLength(1);

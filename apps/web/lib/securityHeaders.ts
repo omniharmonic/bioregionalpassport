@@ -7,7 +7,7 @@
  *   font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:;
  *   connect-src 'self' https://*.bioregionalpassport.org https://bioregionalpassport.org
  *     https://tiles.openfreemap.org https://tile.openstreetmap.org;
- *   worker-src 'self' blob:; child-src blob:;
+ *   worker-src 'self' blob:; child-src blob:; frame-src 'none';
  *   frame-ancestors 'none'; base-uri 'self'; form-action 'self'
  *
  * Relaxations, each needed by something that ships (documented here, nowhere else):
@@ -62,6 +62,8 @@ export function contentSecurityPolicy(opts: SecurityHeaderOptions): string {
     `connect-src ${[...connect].join(' ')}`,
     "worker-src 'self' blob:",
     'child-src blob:',
+    // Nothing is ever framed; child-src would otherwise let blob: frames in.
+    "frame-src 'none'",
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",

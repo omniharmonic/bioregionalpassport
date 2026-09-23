@@ -150,6 +150,7 @@ describe('TrustPolicySchema / defaultTrustPolicy', () => {
     if (ok.ok) {
       expect(ok.policy.admission).toEqual({ peerWitnessing: true, vouchOnly: { enabled: false, endorsements: 3 } });
     }
+    expect(validateTrustPolicy({ ...base, admission: { witnessTier: 'T1' } }).ok).toBe(false);
     const badTier = validateTrustPolicy({ ...base, admission: { witnessTier: 'T5' } });
     expect(badTier.ok).toBe(false);
     if (!badTier.ok) expect(badTier.errors.some((e) => e.startsWith('admission.witnessTier'))).toBe(true);

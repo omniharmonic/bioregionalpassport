@@ -91,6 +91,8 @@ export interface ContactRow {
    * by a Trusted neighbor on the spot (`event` = 'meeting', `channel` = that witness's channel, `witness` = their DID).
    */
   witnessRequested?: { event: string; at: string; channel?: string; witness?: string };
+  /** Every peer witness channel asked on for this relationship (all are polled; none is ever dropped). */
+  witnessChannels?: string[];
   /** Digests of witness credentials the pod refused at apply (never picked up again). */
   refusedVwcs?: string[];
   /** The pod's witness credential for this relationship. */

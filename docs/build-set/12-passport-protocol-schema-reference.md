@@ -72,15 +72,18 @@ Signed by the pod DID; referenced from the manifest; versioned.
   "seedRotationMonths": 12,
   "tiers": {
     "T1": { "requires": ["vmcPairComplete", "witnessedEdges>=1"] },
-    "T2": { "requires": ["witnessedEdges>=3", "distinctEvents>=2", "weightedEndorsements>=2", "seedHops<=3", "spread>=0.5"] },
+    "T2": { "requires": ["witnessedEdges>=3", "distinctEventsOrWitnesses>=2", "weightedEndorsements>=2", "seedHops<=3", "spread>=0.5"] },
     "T3": { "requires": ["electedByGovernance", "T2for>=180d"] },
     "T4": { "requires": ["namedInGovernance"] }
   },
   "vacValidityDays": 90, "grantValidityDays": 90, "vicRatePerMonth": { "T2": 3 },
   "idvcRequired": false, "downgradeAtExpiryOnly": true,
-  "anomaly": { "endorsementVelocityPerDay": 5, "sharedWitnessOnlyFlag": true }
+  "admission": { "witnessTier": "T2", "peerWitnessing": true },
+  "anomaly": { "endorsementVelocityPerDay": 5, "sharedWitnessOnlyFlag": true, "witnessPairsPerWeek": 20, "hubMinAdmits": 5 }
 }
 ```
+
+Note (peer witnessing, Task 21): `distinctEventsOrWitnesses>=N` counts distinct gatherings or distinct witnesses, so a relationship witnessed on the spot by a Trusted member (`admission.witnessTier`, T2–T4) counts like one witnessed at an event; policies without `admission` keep working, and while `peerWitnessing` is not `false` the trust index reads T2 `distinctEvents>=N` the same way.
 
 ## 5. Ceremony and exchange protocol (normative for v1; migrates to DTG Trust Task protocols when published)
 

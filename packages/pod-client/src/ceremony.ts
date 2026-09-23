@@ -476,11 +476,34 @@ export class Ceremony {
       if (b.type !== 'org.bioregion.witness.request' || b.taskContext !== taskContext || answered.has(b.edgeDigest)) continue;
       if (!isType(b.vrcA, 'RelationshipCredential') || !isType(b.vrcB, 'RelationshipCredential')) continue;
       if (pairDigest(b.vrcA, b.vrcB) !== b.edgeDigest) continue;
-      if (!open.has(b.edgeDigest)) {
-        open.set(b.edgeDigest, { seq: m.seq, edgeDigest: b.edgeDigest, taskContext: b.taskContext, requester: b.requester, vrcA: b.vrcA, vrcB: b.vrcB, createdAt: b.createdAt });
-      }
+      if (open.has(b.edgeDigest) || !(await this.pairChecksOut(b.vrcA, b.vrcB, b.edgeDigest))) continue;
+      open.set(b.edgeDigest, { seq: m.seq, edgeDigest: b.edgeDigest, taskContext: b.taskContext, requester: b.requester, vrcA: b.vrcA, vrcB: b.vrcB, createdAt: b.createdAt });
     }
     return [...open.values()];
+  }
+
+  private readonly checkedPairs = new Map<string, boolean>();
+
+  /**
+   * A listed request must carry two genuinely signed, mirrored halves of one relationship in this pod (each issuer
+   * is the other's subject); anything else is skipped, so a witness only ever sees pairs the pod would accept.
+   */
+  private async pairChecksOut(a: VerifiableCredential, b: VerifiableCredential, edgeDigest: string): Promise<boolean> {
+    const known = this.checkedPairs.get(edgeDigest);
+    if (known !== undefined) return known;
+    let ok = a.issuer !== b.issuer && a.credentialSubject?.id === b.issuer && b.credentialSubject?.id === a.issuer;
+    ok &&= a.credentialSubject?.['bioregion'] === this.pod && b.credentialSubject?.['bioregion'] === this.pod;
+    for (const half of [a, b]) {
+      if (!ok) break;
+      if (!(half as Signed).proof) {
+        ok = false;
+        break;
+      }
+      const r = await verifyDocument(half as Signed, this.resolver, { proofPurpose: 'assertionMethod' }).catch(() => ({ ok: false }));
+      ok = r.ok;
+    }
+    this.checkedPairs.set(edgeDigest, ok);
+    return ok;
   }
 
   /** Convener: asks the pod to witness the pair (`POST /events/:id/witness`) and posts `witness.result { vwc }`. */
@@ -498,25 +521,60 @@ export class Ceremony {
 
   /** Applicant (or the other party): looks for a verified `witness.result` for my relationship; stores the VWC. */
   async pollWitnessResult(event: { id: string; taskDigest?: string | null }, contactDid: string): Promise<VerifiableCredential | undefined> {
-    return this.pollResult(eventChannel(event), event, contactDid);
+    // The event channel first; then every witness channel I asked on and the relationship channel, so a result
+    // that arrived elsewhere (another witness, or forwarded by my neighbor) is never lost.
+    return this.pollResult([{ channel: eventChannel(event), event }, ...(await this.peerSources(contactDid))], contactDid);
   }
 
-  private async pollResult(channel: string, event: { id: string } | null, contactDid: string): Promise<VerifiableCredential | undefined> {
+  /** Witness channels asked on for this relationship, plus its relationship channel (forwarded results). */
+  private async peerSources(contactDid: string): Promise<{ channel: string; event: null }[]> {
+    const c = await this.wallet.contact(contactDid);
+    const channels = [...(c?.witnessChannels ?? []), ...(c?.witnessRequested?.channel ? [c.witnessRequested.channel] : []), ...(c?.channel ? [c.channel] : [])];
+    return [...new Set(channels)].map((channel) => ({ channel, event: null }));
+  }
+
+  private async pollResult(sources: { channel: string; event: { id: string } | null }[], contactDid: string): Promise<VerifiableCredential | undefined> {
     const c = await this.wallet.contact(contactDid);
     if (!c?.vrcOut || !c.vrcIn) return undefined;
     if (c.vwc) return c.vwc;
     const edge = pairDigest(c.vrcOut, c.vrcIn);
     const refused = new Set(c.refusedVwcs ?? []);
-    for (const raw of await this.listAll(channel)) {
-      const m = valid(raw);
-      if (!m || m.body.type !== 'org.bioregion.witness.result') continue;
-      const vwc = await this.verifyWitnessResult(m.body.vwc, event, edge);
-      if (!vwc || refused.has(digestMultibase(vwc))) continue;
-      await this.wallet.updateContact(contactDid, { vwc });
-      await this.wallet.storeCredential(vwc, { pod: this.pod });
-      return vwc;
+    for (const { channel, event } of sources) {
+      let msgs: RelayMessage[];
+      try {
+        msgs = await this.listAll(channel);
+      } catch {
+        continue;
+      }
+      for (const raw of msgs) {
+        const m = valid(raw);
+        if (!m || m.body.type !== 'org.bioregion.witness.result') continue;
+        const vwc = await this.verifyWitnessResult(m.body.vwc, event, edge);
+        if (!vwc || refused.has(digestMultibase(vwc))) continue;
+        await this.wallet.updateContact(contactDid, { vwc });
+        await this.wallet.storeCredential(vwc, { pod: this.pod });
+        await this.shareResult(c, vwc, channel);
+        return vwc;
+      }
     }
     return undefined;
+  }
+
+  /**
+   * Forwards a picked-up VWC to the relationship channel (so my neighbor gets it even if they never scanned the
+   * witness's code) and to every other witness channel I asked on (so those witnesses' queues close the request).
+   * Best effort: the VWC is already stored; recipients verify it themselves.
+   */
+  private async shareResult(c: ContactRow, vwc: VerifiableCredential, from: string): Promise<void> {
+    const targets = new Set([...(c.channel ? [c.channel] : []), ...(c.witnessChannels ?? []), ...(c.witnessRequested?.channel ? [c.witnessRequested.channel] : [])]);
+    targets.delete(from);
+    for (const channel of targets) {
+      try {
+        await this.relay.post(channel, c.myDid, { type: 'org.bioregion.witness.result', ...(await this.envelope(c.myDid)), vwc });
+      } catch {
+        // Forwarding is a courtesy; the neighbor can still pick the result up from a witness channel.
+      }
+    }
   }
 
   // ── peer witnessing (no scheduled event) ────────────────────────────────────────────────────────
@@ -550,8 +608,10 @@ export class Ceremony {
       vrcA: c.vrcOut,
       vrcB: c.vrcIn,
     });
+    // Every channel asked on is kept (asking a second witness must not orphan the first one's answer).
     await this.wallet.updateContact(contactDid, {
       edgeDigest,
+      witnessChannels: [...new Set([...(c.witnessChannels ?? []), channel])],
       witnessRequested: { event: MEETING_TASK_CONTEXT, channel, witness: invite.pairwiseDid, at: this.wallet.now().toISOString() },
     });
     return { queued: !!r.queued, edgeDigest, witness: invite.pairwiseDid };
@@ -580,11 +640,13 @@ export class Ceremony {
     return out;
   }
 
-  /** Requester (either neighbor): looks for a verified result on the witness channel I asked on; stores the VWC. */
+  /**
+   * Either neighbor: looks for a verified result on every witness channel asked on for this relationship and on
+   * the relationship channel (where the other neighbor forwards it); stores the VWC and forwards it in turn.
+   */
   async pollPeerWitnessResult(contactDid: string): Promise<VerifiableCredential | undefined> {
     const c = await this.wallet.contact(contactDid);
-    const channel = c?.witnessRequested?.event === MEETING_TASK_CONTEXT ? c.witnessRequested.channel : undefined;
-    if (!channel) return c?.vwc;
-    return this.pollResult(channel, null, contactDid);
+    if (!c || c.vwc) return c?.vwc;
+    return this.pollResult(await this.peerSources(contactDid), contactDid);
   }
 }

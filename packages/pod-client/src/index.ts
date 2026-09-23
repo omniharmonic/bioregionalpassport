@@ -44,6 +44,7 @@ export {
   PodError,
   messageOf,
   abbreviateDid,
+  matchCode,
   channelFor,
   eventChannel,
   platformDomainOf,

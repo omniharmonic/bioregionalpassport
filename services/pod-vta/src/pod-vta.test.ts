@@ -48,10 +48,12 @@ const resolver = createResolver({
     [OTHER_POD]: didWebDocument(OTHER_POD, otherKey.publicKeyMultibase),
   },
 });
-// Most tests pin the pre-21c behaviour: a policy without `admission` (as pods provisioned before Task 21c carry), so
-// T2 does not hold `vwc:issue` and admission has no witness-tier floor. Peer-witnessing tests opt in explicitly.
-const { admission: _defaultAdmission, ...legacyPolicy } = defaultTrustPolicy(POD_DID);
-const policy: TrustPolicy = legacyPolicy;
+// Most tests use a policy WITHOUT `admission`, the shape of every policy published before Task 21c (the default
+// policy now sets `admission.witnessTier: 'T2'`). Without it T2 holds no `vwc:issue` and admission has no
+// witness-tier floor. (Unrelated to the 'legacy' `witness_refs.witness_tier` marker for pre-0011 rows.)
+// Peer-witnessing tests opt in with `pT2` / `pT3` below.
+const { admission: _defaultAdmission, ...policyWithoutAdmission } = defaultTrustPolicy(POD_DID);
+const policy: TrustPolicy = policyWithoutAdmission;
 
 let db: Db;
 let deps: PodVtaDeps;
