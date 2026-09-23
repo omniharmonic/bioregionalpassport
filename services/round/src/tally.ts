@@ -51,6 +51,8 @@ export interface TallyAdjustment {
 
 export interface TallyEntry {
   id: string;
+  /** Alias of `rawVotes` (plan §5 Task 13 shape). */
+  votes: number;
   rawVotes: number;
   voters: number;
   voiceSum: number;
@@ -69,6 +71,8 @@ export interface Tally {
   weights: Record<string, number>;
   ballotCount: number;
   ballotsHash: string;
+  /** Plan §5 Task 13 shape: `verifiable.ballotsHash` (same value as the top-level `ballotsHash`). */
+  verifiable: { ballotsHash: string };
   totalMatching: number;
   unallocated: number;
   computedAt: string;
@@ -131,12 +135,15 @@ function allocate(ids: string[], qf: Map<string, number>, poolCents: number, cap
       out.set(id, out.get(id)! + c);
       placed += c;
     }
+    // Rounding remainder: to the top proposal, or, when a cap leaves it no room, the next with room (qf order).
     let leftover = remaining - placed;
-    const top = [...active].sort((a, b) => qf.get(b)! - qf.get(a)! || cmp(a, b))[0]!;
-    const room = capCents === undefined ? leftover : Math.max(0, capCents - out.get(top)!);
-    const give = Math.min(leftover, room);
-    out.set(top, out.get(top)! + give);
-    leftover -= give;
+    for (const id of [...active].sort((a, b) => qf.get(b)! - qf.get(a)! || cmp(a, b))) {
+      if (leftover <= 0) break;
+      const room = capCents === undefined ? leftover : Math.max(0, capCents - out.get(id)!);
+      const give = Math.min(leftover, room);
+      out.set(id, out.get(id)! + give);
+      leftover -= give;
+    }
     remaining = leftover;
     break;
   }
@@ -190,6 +197,7 @@ export function tally(
     const adjCents = adjBy.get(id) ?? 0;
     return {
       id,
+      votes: a.rawVotes,
       rawVotes: a.rawVotes,
       voters: a.voters,
       voiceSum: round6(a.voiceSum),
@@ -199,6 +207,7 @@ export function tally(
       adjustment: adjCents / 100,
     };
   });
+  const hash = ballotsHash(sorted);
   const totalCents = ids.reduce((s, id) => s + cents.get(id)! + (adjBy.get(id) ?? 0), 0);
   return {
     proposals: entries,
@@ -206,7 +215,8 @@ export function tally(
     matchingCap: cap,
     weights: { ...weights },
     ballotCount: sorted.length,
-    ballotsHash: ballotsHash(sorted),
+    ballotsHash: hash,
+    verifiable: { ballotsHash: hash },
     totalMatching: totalCents / 100,
     unallocated: unallocatedCents / 100,
     computedAt: opts.computedAt ?? new Date(0).toISOString(),

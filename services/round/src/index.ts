@@ -25,6 +25,8 @@ export {
 export {
   GROUP_TIER,
   voterHash,
+  requirePodSession,
+  publicTally,
   createRound,
   openRound,
   listRounds,

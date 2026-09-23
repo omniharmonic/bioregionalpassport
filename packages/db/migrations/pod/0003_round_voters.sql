@@ -9,7 +9,7 @@
 CREATE TABLE IF NOT EXISTS ballot_voters (
   round_id text NOT NULL,
   voter_hash text NOT NULL,
-  ballot_id text NOT NULL,
+  ballot_id text NOT NULL REFERENCES ballots(id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (round_id, voter_hash)
 );

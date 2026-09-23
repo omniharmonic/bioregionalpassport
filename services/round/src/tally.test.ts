@@ -47,6 +47,20 @@ describe('tally', () => {
     expect(t30.unallocated).toBe(40);
   });
 
+  it('gives the rounding remainder to the next proposal with room when the top one is at the cap', () => {
+    const bs = [b('did:key:y1', { B: 80 }), b('did:key:y2', { C: 41 }), b('did:key:y3', { D: 41 })];
+    const t = tally(bs, ['B', 'C', 'D'], ROUND_WEIGHTS, 0.81, { matchingCap: 0.4 });
+    expect(t.proposals.map((p) => p.matching)).toEqual([0.4, 0.21, 0.2]);
+    expect(t.totalMatching).toBe(0.81);
+    expect(t.unallocated).toBe(0);
+  });
+
+  it('carries the plan shape aliases: votes and verifiable.ballotsHash', () => {
+    const t = tally(ballots, ['A', 'B'], ROUND_WEIGHTS, 100);
+    expect(t.proposals.map((p) => p.votes)).toEqual(t.proposals.map((p) => p.rawVotes));
+    expect(t.verifiable).toEqual({ ballotsHash: t.ballotsHash });
+  });
+
   it('applies and lists adjustments', () => {
     const adj = { proposalId: 'A', delta: -10, reason: 'Sybil cluster', stewardDid: 'did:key:zS', createdAt: '2026-09-30T00:00:00.000Z' };
     const t = tally(ballots, ['A', 'B'], ROUND_WEIGHTS, 100, { adjustments: [adj] });

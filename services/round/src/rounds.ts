@@ -133,6 +133,20 @@ function requireStatus(round: RoundView, allowed: RoundStatus[], message: string
   if (!allowed.includes(round.status)) throw new ServiceError(409, 'WRONG_ROUND_STATUS', message);
 }
 
+/** The session must be a membership session for this pod. */
+export function requirePodSession(ctx: RoundContext, session: SessionClaims): void {
+  if (session.pod !== ctx.podDid) {
+    throw new ServiceError(403, 'POD_MISMATCH', 'Your session is not a membership session for this pod.');
+  }
+}
+
+/** Public view of a tally: the adjustment log (steward DIDs and reasons) is shown only once published. */
+export function publicTally(t: Tally, status: RoundStatus, steward: boolean): Tally | Omit<Tally, 'adjustments'> {
+  if (status === 'published' || steward) return t;
+  const { adjustments: _hidden, ...rest } = t;
+  return rest;
+}
+
 const sha256Hex = (s: string): string => bytesToHex(sha256(utf8ToBytes(s)));
 
 /** `sha256(round_id ‖ principal)`, hex. Binds one ballot per member (or group) per round; never published. */
@@ -222,7 +236,8 @@ export async function createProposal(ctx: RoundContext, session: SessionClaims, 
     throw bad('BAD_REQUEST', 'The budget must be a positive amount.');
   }
   const placeId = input.placeId === undefined || input.placeId === null ? undefined : requireText(input.placeId, 'placeId', 200);
-  const lead = input.lead === undefined || input.lead === null ? session.subject : requireText(input.lead, 'lead', 200);
+  // The published lead is always the proposing member (`lead_did`); `body.lead` is ignored.
+  const lead = session.subject;
   const record = ProjectRecordSchema.parse({
     bioregion: ctx.slug,
     title,
@@ -301,6 +316,18 @@ export async function submitBallot(
   roundId: string,
   body: unknown,
 ): Promise<BallotResult> {
+  requirePodSession(ctx, session);
+  const linkage = isObject(body) && isObject(body['linkage']) ? body['linkage'] : undefined;
+  const groupPath = linkage?.['presentation'] !== undefined;
+  if (!groupPath) {
+    // Personal path: the session itself must carry round:vote and must not be a delegated (group) session.
+    if (!session.authorities.includes('round:vote')) {
+      throw new ServiceError(403, 'MISSING_AUTHORITY', 'This needs the "round:vote" authority, which your passport does not carry.');
+    }
+    if (session.delegatedFor) {
+      throw bad('DELEGATED_SESSION', 'This session acts for a group, so vote for the group by sending its delegation presentation with the ballot.');
+    }
+  }
   const { view } = await loadRound(ctx, roundId, true);
   if (view.status !== 'open') throw new ServiceError(409, 'ROUND_NOT_OPEN', 'This round is not open for voting.');
   const now = ctx.now().getTime();
@@ -330,11 +357,10 @@ export async function submitBallot(
   let principal: string;
   let tier: string | undefined;
   let onBehalfOf: string | undefined;
-  const linkage = isObject(body['linkage']) ? body['linkage'] : undefined;
-  if (linkage?.['presentation'] !== undefined) {
-    if (!isObject(linkage['presentation'])) throw bad('BAD_REQUEST', 'The group presentation could not be read.');
+  if (groupPath) {
+    if (!isObject(linkage!['presentation'])) throw bad('BAD_REQUEST', 'The group presentation could not be read.');
     const result = await verifyDTG(
-      linkage['presentation'] as unknown as VerifiablePresentation,
+      linkage!['presentation'] as unknown as VerifiablePresentation,
       {
         acceptedPods: [ctx.podDid],
         requireAuthority: ['round:vote'],
@@ -343,7 +369,11 @@ export async function submitBallot(
         domain: `${ctx.slug}.${ctx.platformDomain}`,
         podNames: { [ctx.podDid]: ctx.manifest.identity.name },
       },
-      { resolver: deps.resolver, now: ctx.now },
+      {
+        resolver: deps.resolver,
+        now: ctx.now,
+        ...(deps.statusFetch ? { statusFetch: (url: string) => deps.statusFetch!(url, ctx) } : {}),
+      },
     );
     if (!result.ok) {
       const code = result.error?.code ?? 'BAD_PROOF';
@@ -357,9 +387,9 @@ export async function submitBallot(
     }
     principal = onBehalfOf = result.delegatedFor;
     tier = GROUP_TIER;
-  } else if (session.delegatedFor) {
-    principal = onBehalfOf = session.delegatedFor;
-    tier = GROUP_TIER;
+    if (!tierOk(tier, view.eligibility.voteTier)) {
+      throw new ServiceError(403, 'TIER_TOO_LOW', `Voting in this round needs tier ${view.eligibility.voteTier} or above, and groups vote at ${GROUP_TIER}.`);
+    }
   } else {
     principal = session.subject;
     tier = session.tier;
@@ -488,6 +518,9 @@ export async function addAdjustment(
   const t = await computeTally(ctx, view, all, ctx.now().toISOString());
   const entry = t.proposals.find((p) => p.id === proposalId)!;
   if (entry.matching < 0) throw bad('NEGATIVE_MATCHING', `This adjustment would take ${proposalId} below zero matching.`);
+  if (Math.round(t.totalMatching * 100) > Math.round(t.pool * 100)) {
+    throw bad('OVER_POOL', "Adjustments cannot allocate more than the round's pool.");
+  }
   await ctx.db.query(
     `INSERT INTO adjustments (round_id, proposal_id, steward_did, delta, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
     [id, proposalId, adjustment.stewardDid, adjustment.delta, adjustment.reason, adjustment.createdAt],
@@ -586,6 +619,15 @@ export async function verifyRound(ctx: RoundContext, deps: RoundDeps, id: string
   const proposals = await listProposals(ctx, id);
   const adjustments = await adjustmentsOf(ctx, id);
   const result = await verifyTally(ballots, proposals, stored, deps, { voiceBudget: round.eligibility.voiceBudget, roundId: id });
+  // The stored tally must use the round's own pool and cap.
+  if (Math.round(stored.pool * 100) !== Math.round(round.pool * 100)) {
+    result.problems.push("The tally's pool differs from the round's pool.");
+    result.ok = false;
+  }
+  if ((stored.matchingCap ?? null) !== (round.eligibility.matchingCap ?? null)) {
+    result.problems.push("The tally's matching cap differs from the round's matching cap.");
+    result.ok = false;
+  }
   // The stored tally must also list exactly the logged adjustments (never silently).
   if (canonicalize(adjustments) !== canonicalize(stored.adjustments)) {
     result.problems.push('The adjustments in the tally differ from the steward review log.');

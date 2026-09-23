@@ -73,9 +73,13 @@ function match(pattern: string, path: string): Record<string, string> | null {
   return params;
 }
 
-async function call(method: string, fullPath: string, opts: { body?: unknown; session?: SessionClaims; now?: Date } = {}): Promise<{ status: number; body: any }> {
+async function call(
+  method: string,
+  fullPath: string,
+  opts: { body?: unknown; session?: SessionClaims; now?: Date; routes?: RoundRoute[] } = {},
+): Promise<{ status: number; body: any }> {
   const [path, qs] = fullPath.split('?') as [string, string | undefined];
-  for (const r of routes) {
+  for (const r of opts.routes ?? routes) {
     const params = r.method === method ? match(r.path, path) : null;
     if (!params) continue;
     const req = { params, query: Object.fromEntries(new URLSearchParams(qs ?? '')), body: opts.body, ...(opts.session ? { session: opts.session } : {}) };
@@ -114,6 +118,11 @@ function signBallot(seed: Uint8Array, roundId: string, allocations: Record<strin
   );
 }
 
+const signedless = <T extends { proof: unknown }>(doc: T): Omit<T, 'proof'> => {
+  const { proof: _proof, ...rest } = doc;
+  return rest;
+};
+
 const ballotCount = async (roundId: string) =>
   withPod(db, SLUG, async (tx) => {
     const [b] = await tx.query(`SELECT count(*)::int AS n FROM ballots WHERE round_id = $1`, [roundId]);
@@ -131,9 +140,10 @@ describe('grants round — full lifecycle', () => {
   // Group vote fixtures: a group did:key delegates round:vote to a member steward.
   const groupSeed = crypto.getRandomValues(new Uint8Array(32));
   const group = keyPairFromSeed(groupSeed);
-  const groupSteward = newVoter('T2');
+  // A T1 steward: no round:vote of their own, yet may vote for the group through the delegation.
+  const groupSteward = newVoter('T1');
 
-  function groupPresentation(challenge: string, ownActions: string[] = tierDefaultActions('T1')) {
+  function groupPresentation(challenge: string, ownActions: string[] = tierDefaultActions('T1'), groupStatus?: Record<string, unknown>) {
     const s = groupSteward.persona;
     const grant = signDocument(
       buildMembershipGrant({ pod: POD_DID, member: s.did, bioregion: SLUG, placeIds: ['huc12:101900050301'], governance: `https://${POD_DOMAIN}/governance`, validFrom: FROM, validUntil: UNTIL }),
@@ -145,9 +155,12 @@ describe('grants round — full lifecycle', () => {
       buildDelegationAcceptance({ steward: s.did, group: group.did, grantDigest: digestMultibase(delegation), validFrom: FROM, validUntil: UNTIL, scope: ['round:vote'] }),
       s,
     );
-    const vac = (subject: string, actions: string[], tier: string) =>
-      signDocument(buildAuthority({ issuer: POD_DID, subject, scope: POD_DID, actions, validFrom: FROM, validUntil: UNTIL, policyVersion: 1, tier }), podKey);
-    const creds: VerifiableCredential[] = [grant, ack, delegation, acceptance, vac(group.did, ['round:vote'], 'T2'), vac(s.did, ownActions, 'T1')];
+    const vac = (subject: string, actions: string[], tier: string, status?: Record<string, unknown>) =>
+      signDocument(
+        { ...buildAuthority({ issuer: POD_DID, subject, scope: POD_DID, actions, validFrom: FROM, validUntil: UNTIL, policyVersion: 1, tier }), ...(status ? { credentialStatus: status } : {}) },
+        podKey,
+      );
+    const creds: VerifiableCredential[] = [grant, ack, delegation, acceptance, vac(group.did, ['round:vote'], 'T2', groupStatus), vac(s.did, ownActions, 'T1')];
     return createPresentation(creds, s, { challenge, domain: POD_DOMAIN });
   }
 
@@ -159,6 +172,9 @@ describe('grants round — full lifecycle', () => {
       closesAt: new Date(NOW.getTime() + 7 * DAY).toISOString(),
       eligibility: { voiceBudget: 100 },
     };
+    const otherPod = await call('POST', '/rounds', { session: { ...steward, pod: 'did:web:example.org:dids:elsewhere' }, body });
+    expect(otherPod.status).toBe(403);
+    expect(otherPod.body.code).toBe('POD_MISMATCH');
     const refused = await call('POST', '/rounds', { session: voters[0]!.session, body });
     expect(refused.status).toBe(403);
     expect(refused.body.code).toBe('MISSING_AUTHORITY');
@@ -186,10 +202,11 @@ describe('grants round — full lifecycle', () => {
     for (const [i, p] of proposers.entries()) {
       const res = await call('POST', `/rounds/${roundId}/proposals`, {
         session: p.session,
-        body: { title: `Project ${i + 1}`, summary: 'Creek restoration work', budget: 500 + i * 100, placeId: 'huc12:101900050301' },
+        body: { title: `Project ${i + 1}`, summary: 'Creek restoration work', budget: 500 + i * 100, placeId: 'huc12:101900050301', lead: 'did:key:zSomeoneElse' },
       });
       expect(res.status).toBe(201);
       expect(res.body.leadDid).toBe(p.persona.did);
+      // body.lead is ignored: the published lead is the proposing member.
       expect(res.body.record).toMatchObject({ bioregion: SLUG, round: roundId, budget: 500 + i * 100, lead: p.persona.did, funded: false });
       proposalIds.push(res.body.id);
     }
@@ -250,6 +267,40 @@ describe('grants round — full lifecycle', () => {
     expect(stolen.body.code).toBe('VOTER_KEY_IN_USE');
   });
 
+  it('refuses fractional or negative votes, a ballot for another round, and votes after closesAt', async () => {
+    const v = voters[1]!;
+    for (const n of [1.5, -1]) {
+      const res = await call('POST', `/rounds/${roundId}/ballots`, { session: v.session, body: { ballot: signBallot(v.seed, roundId, { [proposalIds[0]!]: n }) } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('BAD_BALLOT');
+    }
+    const other = signBallot(v.seed, roundId, { [proposalIds[0]!]: 1 });
+    const wrong = await call('POST', `/rounds/${roundId}/ballots`, {
+      session: v.session,
+      body: { ballot: signDocument({ ...signedless(other), round: 'rnd_other' }, deriveRoundKey(v.seed, roundId), { created: NOW.toISOString() }) },
+    });
+    expect(wrong.body.code).toBe('WRONG_ROUND');
+    const late = await call('POST', `/rounds/${roundId}/ballots`, {
+      session: v.session,
+      body: { ballot: signBallot(v.seed, roundId, { [proposalIds[0]!]: 1 }) },
+      now: new Date(NOW.getTime() + 8 * DAY),
+    });
+    expect(late.status).toBe(409);
+    expect(late.body).toEqual({ code: 'ROUND_NOT_OPEN', message: 'Voting in this round closed on 2026-09-29.' });
+  });
+
+  it('refuses a personal ballot from a delegated session and adjustments while the round is open', async () => {
+    const v = voters[2]!;
+    const res = await call('POST', `/rounds/${roundId}/ballots`, {
+      session: { ...v.session, delegatedFor: 'did:key:zGroup' },
+      body: { ballot: signBallot(v.seed, roundId, { [proposalIds[0]!]: 1 }) },
+    });
+    expect(res.body.code).toBe('DELEGATED_SESSION');
+    const adj = await call('POST', `/rounds/${roundId}/adjustments`, { session: steward, body: { proposalId: proposalIds[0], delta: 1, reason: 'too early' } });
+    expect(adj.status).toBe(409);
+    expect(adj.body.code).toBe('WRONG_ROUND_STATUS');
+  });
+
   it('a second ballot from the same member replaces the first (one per voter)', async () => {
     const v = voters[1]!;
     const res = await call('POST', `/rounds/${roundId}/ballots`, { session: v.session, body: { ballot: signBallot(v.seed, roundId, { [proposalIds[0]!]: 6, [proposalIds[1]!]: 2 }) } });
@@ -258,7 +309,8 @@ describe('grants round — full lifecycle', () => {
     expect(await ballotCount(roundId)).toEqual({ ballots: 5, voters: 5 });
   });
 
-  it('a steward votes for a group through a delegation chain; one ballot per group', async () => {
+  it('a T1 steward votes for a group through a delegation chain; one ballot per group', async () => {
+    expect(groupSteward.session.authorities).not.toContain('round:vote');
     const groupBallot = (allocations: Record<string, number>) => signBallot(groupSeed, roundId, allocations);
     const first = await call('POST', `/rounds/${roundId}/ballots`, {
       session: groupSteward.session,
@@ -292,6 +344,30 @@ describe('grants round — full lifecycle', () => {
       body: { ballot: groupBallot({ [proposalIds[2]!]: 6 }), linkage: { presentation: groupPresentation(roundId, tierDefaultActions('T2')) } },
     });
     expect(own.body.code).toBe('NOT_A_GROUP_VOTE');
+
+    // A revoked group VAC is refused when the pod's status list is wired in.
+    const statusUrl = `https://${POD_DOMAIN}/api/vta/status/vac`;
+    const seen: string[] = [];
+    const revokedBits = new Uint8Array(16);
+    revokedBits[0] = 0b0000_0100; // index 5
+    const withStatus = createRoundRoutes({
+      resolver,
+      statusFetch: async (url, ctx) => {
+        seen.push(`${ctx.slug} ${url}`);
+        return revokedBits;
+      },
+    });
+    const status = { type: 'BitstringStatusListEntry', statusPurpose: 'revocation', statusListIndex: '5', statusListCredential: statusUrl };
+    const revoked = await call('POST', `/rounds/${roundId}/ballots`, {
+      routes: withStatus,
+      session: groupSteward.session,
+      body: { ballot: groupBallot({ [proposalIds[2]!]: 6 }), linkage: { presentation: groupPresentation(roundId, tierDefaultActions('T1'), status) } },
+    });
+    expect(revoked.status).toBe(403);
+    expect(revoked.body.code).toBe('EXPIRED');
+    expect(revoked.body.message).toMatch(/revoked/);
+    expect(seen).toContain(`${SLUG} ${statusUrl}`);
+    expect(await ballotCount(roundId)).toEqual({ ballots: 6, voters: 6 });
   });
 
   it('keeps the tally private until the round closes', async () => {
@@ -314,6 +390,8 @@ describe('grants round — full lifecycle', () => {
     const p0 = stored.proposals.find((p: any) => p.id === proposalIds[0]);
     // voter0 5 (T2), voter1 6 (T2, replaced ballot), voter4 1 (T3)
     expect(p0.rawVotes).toBe(12);
+    expect(p0.votes).toBe(12);
+    expect(stored.verifiable).toEqual({ ballotsHash: stored.ballotsHash });
     expect(p0.voters).toBe(3);
     expect(p0.voiceSum).toBeCloseTo(Math.sqrt(5) + Math.sqrt(6) + 1.2, 5);
     const late = await call('POST', `/rounds/${roundId}/ballots`, { session: voters[0]!.session, body: { ballot: signBallot(voters[0]!.seed, roundId, {}) } });
@@ -330,13 +408,16 @@ describe('grants round — full lifecycle', () => {
     expect(text).not.toContain('voter_hash');
     expect(published.filter((b) => b.onBehalfOf === group.did)).toHaveLength(1);
     expect(published.find((b) => b.onBehalfOf)!.tier).toBe('T2');
-    expect(res.body.tally).toEqual(stored);
+    // Before publication the public tally omits the adjustment log (none yet here).
+    const { adjustments: _log, ...publicView } = stored;
+    expect(res.body.tally).toEqual(publicView);
 
     // Anyone can recompute from the published output alone.
-    const recomputed = tally(published, stored.proposals.map((p: any) => p.id), ROUND_WEIGHTS, stored.pool, {
-      matchingCap: stored.matchingCap,
-      adjustments: stored.adjustments,
-      computedAt: stored.computedAt,
+    const pub = res.body.tally;
+    const recomputed = tally(published, pub.proposals.map((p: any) => p.id), ROUND_WEIGHTS, pub.pool, {
+      matchingCap: pub.matchingCap,
+      adjustments: pub.adjustments ?? [],
+      computedAt: pub.computedAt,
     });
     expect(canonicalize(recomputed)).toBe(canonicalize(stored));
 
@@ -372,6 +453,16 @@ describe('grants round — full lifecycle', () => {
     ]);
     expect(res.body.tally.totalMatching).toBe(950);
     stored = res.body.tally;
+    const overPool = await call('POST', `/rounds/${roundId}/adjustments`, { session: steward, body: { proposalId: target, delta: 60, reason: 'Late correction' } });
+    expect(overPool.status).toBe(400);
+    expect(overPool.body).toEqual({ code: 'OVER_POOL', message: "Adjustments cannot allocate more than the round's pool." });
+    // Before publication the review log is hidden from public reads, but visible to stewards.
+    const pub = await call('GET', `/rounds/${roundId}/tally`);
+    expect(pub.body.tally.adjustments).toBeUndefined();
+    expect(pub.body.tally.proposals).toEqual(stored.proposals);
+    expect((await call('GET', `/rounds/${roundId}`)).body.tally.adjustments).toBeUndefined();
+    expect((await call('GET', `/rounds/${roundId}/verify`)).body.stored.adjustments).toBeUndefined();
+    expect((await call('GET', `/rounds/${roundId}/tally`, { session: steward })).body.tally).toEqual(stored);
     expect((await call('GET', `/rounds/${roundId}/verify`)).body.ok).toBe(true);
     expect((await call('GET', `/rounds/${roundId}/adjustments`)).status).toBe(401);
     expect((await call('GET', `/rounds/${roundId}/adjustments`, { session: steward })).body.adjustments).toHaveLength(1);
@@ -395,6 +486,7 @@ describe('grants round — full lifecycle', () => {
       expect(row.record.round).toBe(roundId);
     }
     expect((await call('GET', `/rounds/${roundId}/adjustments`)).body.adjustments).toHaveLength(1);
+    expect((await call('GET', `/rounds/${roundId}/tally`)).body.tally.adjustments).toHaveLength(1);
     const round = await call('GET', `/rounds/${roundId}`);
     expect(round.body.tally).toEqual(stored);
     expect(round.body.proposals).toHaveLength(3);
@@ -410,5 +502,74 @@ describe('grants round — full lifecycle', () => {
     const v = await call('GET', `/rounds/${roundId}/verify`);
     expect(v.body.ok).toBe(false);
     expect(v.body.problems.length).toBeGreaterThan(0);
+  });
+});
+
+describe('grants round — matching cap and tier eligibility end to end', () => {
+  const steward = sessionOf(generateKeyPair().did, 'T3');
+  const voters = [newVoter('T3'), newVoter('T3'), newVoter('T3')];
+  let roundId: string;
+  const ids: string[] = [];
+
+  it('caps matching per proposal and re-splits the excess; T2 voters and groups are below voteTier T3', async () => {
+    const created = await call('POST', '/rounds', {
+      session: steward,
+      body: { title: 'Capped round', pool: 100, opensAt: FROM, closesAt: new Date(NOW.getTime() + DAY).toISOString(), eligibility: { voteTier: 'T3', matchingCap: 40 } },
+    });
+    roundId = created.body.id;
+    for (const title of ['A', 'B', 'C']) {
+      // Stewards may add proposals while the round is a draft.
+      const p = await call('POST', `/rounds/${roundId}/proposals`, { session: steward, body: { title, budget: 100 } });
+      expect(p.status).toBe(201);
+      ids.push(p.body.id);
+    }
+    await call('POST', `/rounds/${roundId}/open`, { session: steward });
+    const allocs = [{ [ids[0]!]: 9 }, { [ids[0]!]: 4, [ids[1]!]: 1 }, { [ids[2]!]: 1 }];
+    for (const [i, v] of voters.entries()) {
+      const res = await call('POST', `/rounds/${roundId}/ballots`, { session: v.session, body: { ballot: signBallot(v.seed, roundId, allocs[i]!) } });
+      expect(res.status).toBe(201);
+    }
+    const t2 = newVoter('T2');
+    const low = await call('POST', `/rounds/${roundId}/ballots`, { session: t2.session, body: { ballot: signBallot(t2.seed, roundId, { [ids[1]!]: 1 }) } });
+    expect(low.status).toBe(403);
+    expect(low.body.code).toBe('TIER_TOO_LOW');
+
+    // A group votes at T2, which is below this round's voteTier.
+    const groupSeed = crypto.getRandomValues(new Uint8Array(32));
+    const group = keyPairFromSeed(groupSeed);
+    const s = newVoter('T1');
+    const grant = signDocument(
+      buildMembershipGrant({ pod: POD_DID, member: s.persona.did, bioregion: SLUG, placeIds: [], governance: `https://${POD_DOMAIN}/governance`, validFrom: FROM, validUntil: UNTIL }),
+      podKey,
+    );
+    const ack = signDocument(buildMembershipAck({ member: s.persona.did, pod: POD_DID, grantDigest: digestMultibase(grant), validFrom: FROM, validUntil: UNTIL }), s.persona);
+    const delegation = signDocument(buildDelegation({ group: group.did, steward: s.persona.did, scope: ['round:vote'], validFrom: FROM, validUntil: UNTIL }), group);
+    const acceptance = signDocument(
+      buildDelegationAcceptance({ steward: s.persona.did, group: group.did, grantDigest: digestMultibase(delegation), validFrom: FROM, validUntil: UNTIL, scope: ['round:vote'] }),
+      s.persona,
+    );
+    const groupVac = signDocument(buildAuthority({ issuer: POD_DID, subject: group.did, scope: POD_DID, actions: ['round:vote'], validFrom: FROM, validUntil: UNTIL, tier: 'T2' }), podKey);
+    const presentation = createPresentation([grant, ack, delegation, acceptance, groupVac], s.persona, { challenge: roundId, domain: POD_DOMAIN });
+    const groupRes = await call('POST', `/rounds/${roundId}/ballots`, {
+      session: s.session,
+      body: { ballot: signBallot(groupSeed, roundId, { [ids[1]!]: 1 }), linkage: { presentation } },
+    });
+    expect(groupRes.status).toBe(403);
+    expect(groupRes.body.code).toBe('TIER_TOO_LOW');
+
+    const closed = await call('POST', `/rounds/${roundId}/close`, { session: steward });
+    const t = closed.body.tally;
+    expect(t.matchingCap).toBe(40);
+    // qf: A (1.2·3 + 1.2·2)² = 36, B 1.44, C 1.44 → A capped at 40, the other 60 split evenly.
+    expect(t.proposals.map((p: any) => [p.id, p.matching])).toEqual(ids.map((id, i) => [id, [40, 30, 30][i]]).sort((a, b) => (a[0]! < b[0]! ? -1 : 1)));
+    expect(t.totalMatching).toBe(100);
+    expect((await call('GET', `/rounds/${roundId}/verify`)).body.ok).toBe(true);
+  });
+
+  it('/verify refuses a tally whose pool no longer matches the round', async () => {
+    await withPod(db, SLUG, (tx) => tx.query(`UPDATE rounds SET pool = 200 WHERE id = $1`, [roundId]));
+    const v = await call('GET', `/rounds/${roundId}/verify`);
+    expect(v.body.ok).toBe(false);
+    expect(v.body.problems).toContain("The tally's pool differs from the round's pool.");
   });
 });
