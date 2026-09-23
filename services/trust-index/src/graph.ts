@@ -1,0 +1,104 @@
+import { TIERS, type Tier } from '@passport/vocab';
+import { ensureIndexTables } from './schema.js';
+import { isEndorsementScope } from './scorer.js';
+import type { IndexContext, MemberAggregate, TrustGraph } from './types.js';
+
+const DAY_MS = 86_400_000;
+
+/** One opted-in posting joined with its commitment and (if witnessed) its witness reference. */
+export interface PostingRow {
+  poster_did: string;
+  commitment: string;
+  scope: string;
+  witnessed: boolean;
+  weighted: boolean;
+  created_at: Date | string;
+  witness_ref: string | null;
+  event_id: string | null;
+  convener_did: string | null;
+}
+
+export async function loadPostings(ctx: IndexContext): Promise<PostingRow[]> {
+  await ensureIndexTables(ctx.db);
+  return ctx.db.query<PostingRow>(
+    `SELECT p.poster_did, c.commitment, c.scope, p.witnessed, p.weighted, p.created_at,
+            c.witness_ref, w.event_id, w.convener_did
+       FROM index_postings p
+       JOIN edge_commitments c ON c.commitment = p.commitment
+       LEFT JOIN witness_refs w ON w.digest = c.witness_ref
+      WHERE c.revoked_at IS NULL
+      ORDER BY p.created_at, c.commitment`,
+  );
+}
+
+function asTier(value: unknown): Tier | null {
+  return typeof value === 'string' && (TIERS as readonly string[]).includes(value) ? (value as Tier) : null;
+}
+
+export function toDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
+}
+
+/** Builds per-member aggregates + adjacency for the whole pod (BFS needs the whole graph). */
+export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph; postings: PostingRow[] }> {
+  const postings = await loadPostings(ctx);
+  const memberRows = await ctx.db.query<{ did: string; tier: string }>('SELECT did, tier FROM members');
+  const linkRows = await ctx.db.query<{ from_did: string; to_did: string }>('SELECT from_did, to_did FROM index_links');
+  const now = ctx.now().getTime();
+
+  const members = new Map<string, MemberAggregate>();
+  const witnessSets = new Map<string, { refs: Set<string>; events: Set<string>; conveners: Set<string> }>();
+  const ensure = (did: string): MemberAggregate => {
+    let m = members.get(did);
+    if (!m) {
+      m = {
+        did,
+        vmcPairComplete: false,
+        recordedTier: null,
+        witnessedEdges: 0,
+        distinctEvents: 0,
+        distinctConveners: 0,
+        endorsements: [],
+      };
+      members.set(did, m);
+      witnessSets.set(did, { refs: new Set(), events: new Set(), conveners: new Set() });
+    }
+    return m;
+  };
+
+  for (const row of memberRows) {
+    const m = ensure(row.did);
+    m.vmcPairComplete = true;
+    m.recordedTier = asTier(row.tier);
+  }
+
+  for (const p of postings) {
+    const m = ensure(p.poster_did);
+    if (p.witnessed && p.witness_ref) {
+      const sets = witnessSets.get(p.poster_did)!;
+      sets.refs.add(p.witness_ref);
+      if (p.event_id) sets.events.add(p.event_id);
+      if (p.convener_did) sets.conveners.add(p.convener_did);
+    } else if (isEndorsementScope(p.scope)) {
+      m.endorsements.push({
+        scope: p.scope,
+        ageDays: Math.max(0, (now - toDate(p.created_at).getTime()) / DAY_MS),
+        weighted: p.weighted,
+      });
+    }
+  }
+  for (const [did, sets] of witnessSets) {
+    const m = members.get(did)!;
+    m.witnessedEdges = sets.refs.size;
+    m.distinctEvents = sets.events.size;
+    m.distinctConveners = sets.conveners.size;
+  }
+
+  const links = new Map<string, Set<string>>();
+  for (const { from_did, to_did } of linkRows) {
+    let set = links.get(from_did);
+    if (!set) links.set(from_did, (set = new Set()));
+    set.add(to_did);
+  }
+  return { graph: { members, links }, postings };
+}
