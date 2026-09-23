@@ -29,9 +29,15 @@ importers:
       '@passport/control-plane':
         specifier: workspace:*
         version: link:../../services/control-plane
+      '@passport/credential-core':
+        specifier: workspace:*
+        version: link:../../packages/credential-core
       '@passport/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@passport/pod-vta':
+        specifier: workspace:*
+        version: link:../../services/pod-vta
       '@passport/service-kit':
         specifier: workspace:*
         version: link:../../packages/service-kit

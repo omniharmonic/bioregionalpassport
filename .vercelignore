@@ -1,0 +1,13 @@
+# Never upload secrets or local tooling state with `vercel deploy` from the repo root.
+.env
+.env.*
+!.env.example
+.superpowers
+.playwright-mcp
+.turbo
+**/.turbo
+**/node_modules
+**/.next
+**/dist
+**/coverage
+*.log
