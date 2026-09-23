@@ -133,6 +133,21 @@ function json(status: number, body: unknown, headers?: HeadersInit): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), { status, headers: h });
 }
 
+/**
+ * Sends a handler result. A string body with a non-JSON `content-type` in `extra` (e.g. the gateway's CSV
+ * export) is sent verbatim with those headers; everything else is JSON as before, with any `extra` headers
+ * added (the JSON content type always wins).
+ */
+export function respond(status: number, body: unknown, extra: Record<string, string> = {}, headers: Headers = new Headers()): Response {
+  const contentType = Object.entries(extra).find(([k]) => k.toLowerCase() === 'content-type')?.[1];
+  if (typeof body === 'string' && contentType && !/json/i.test(contentType)) {
+    for (const [k, v] of Object.entries(extra)) headers.set(k, v);
+    if (!headers.has('cache-control')) headers.set('cache-control', 'no-store');
+    return new Response(status === 204 ? null : body, { status, headers });
+  }
+  for (const [k, v] of Object.entries(extra)) if (k.toLowerCase() !== 'content-type') headers.set(k, v);
+  return json(status, body, headers);
+}
 
 // ---------------------------------------------------------------------------
 // Route matching
@@ -436,7 +451,7 @@ export function mountService(routes: MountableRoute[], opts: MountOptions, depsS
           (deps.logError ?? defaultLog)(hookErr, `api ${opts.base} onSuccess`);
         }
       }
-      return json(status, body, headers);
+      return respond(status, body, result.headers, headers);
     } catch (err) {
       return errorToResponse(err, deps?.logError, `api ${opts.base}`);
     }
