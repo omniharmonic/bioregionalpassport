@@ -21,6 +21,37 @@ importers:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
 
+  packages/cli:
+    dependencies:
+      '@passport/control-plane':
+        specifier: workspace:*
+        version: link:../../services/control-plane
+      '@passport/credential-core':
+        specifier: workspace:*
+        version: link:../credential-core
+      '@passport/db':
+        specifier: workspace:*
+        version: link:../db
+      '@passport/tenant-config':
+        specifier: workspace:*
+        version: link:../tenant-config
+      '@passport/vocab':
+        specifier: workspace:*
+        version: link:../vocab
+      '@scure/base':
+        specifier: ^2.4.0
+        version: 2.4.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.4
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^5.0.1
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
+
   packages/credential-core:
     dependencies:
       '@noble/curves':
@@ -187,6 +218,71 @@ importers:
         version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
 
   packages/vocab:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.4
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^5.0.1
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
+
+  services/appview:
+    dependencies:
+      '@passport/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@passport/lexicons':
+        specifier: workspace:*
+        version: link:../../packages/lexicons
+      '@passport/tenant-config':
+        specifier: workspace:*
+        version: link:../../packages/tenant-config
+      '@passport/vocab':
+        specifier: workspace:*
+        version: link:../../packages/vocab
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
+    devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.8
+        version: 0.5.8
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.4
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^5.0.1
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
+
+  services/control-plane:
+    dependencies:
+      '@passport/credential-core':
+        specifier: workspace:*
+        version: link:../../packages/credential-core
+      '@passport/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@passport/lexicons':
+        specifier: workspace:*
+        version: link:../../packages/lexicons
+      '@passport/service-kit':
+        specifier: workspace:*
+        version: link:../../packages/service-kit
+      '@passport/tenant-config':
+        specifier: workspace:*
+        version: link:../../packages/tenant-config
+      '@passport/vocab':
+        specifier: workspace:*
+        version: link:../../packages/vocab
+      '@scure/base':
+        specifier: ^2.4.0
+        version: 2.4.0
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
