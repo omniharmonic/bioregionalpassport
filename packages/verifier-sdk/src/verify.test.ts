@@ -124,6 +124,22 @@ describe('verifyDTG', () => {
     expect(r.explanation).toContain('You act for garden-collective through a delegation of 1 hop.');
   });
 
+  it('unions delegated scopes across requirements served by separate grants from one group', async () => {
+    const vp = present(
+      [
+        ...membershipPair(boulder, alice),
+        ...delegationHop(group, alice, ['round:vote']),
+        ...delegationHop(group, alice, ['round:propose']),
+        vac(boulder, GARDEN_GROUP, ['round:vote', 'round:propose', 'group:create']),
+      ],
+      alice,
+    );
+    const r = await verifyDTG(vp, policy({ requireAuthority: ['round:vote', 'round:propose'], allowDelegation: true }), deps());
+    expect(r.ok).toBe(true);
+    expect(r.delegatedFor).toBe(GARDEN_GROUP);
+    expect(r.authorities).toEqual(['round:propose', 'round:vote']);
+  });
+
   it('refuses a delegation the steward never accepted', async () => {
     const [grantOnly] = delegationHop(group, alice, ['round:vote']);
     const vp = present([...membershipPair(boulder, alice), grantOnly!, vac(boulder, GARDEN_GROUP, ['round:vote'])], alice);

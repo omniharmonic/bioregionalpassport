@@ -314,10 +314,9 @@ async function run(vp: VerifiablePresentation, policy: VerifyPolicy, deps: Verif
     if (principal && principal !== via.principal) {
       throw new Refusal('MISSING_AUTHORITY', 'This presentation mixes delegations from different groups, so it was refused.');
     }
-    if (!principal) {
-      principal = via.principal;
-      delegatedScope = via.scope;
-    } else delegatedScope = new Set([...delegatedScope!].filter((x) => via.scope.has(x)));
+    // Per requirement: `via.scope` is the intersection across this chain's hops. Across requirements: union.
+    principal ??= via.principal;
+    delegatedScope = new Set([...(delegatedScope ?? []), ...via.scope]);
     const theirs = findAuthority(principal, req);
     if (!theirs.vc) {
       throw theirs.problem ?? new Refusal('MISSING_AUTHORITY', `No authority credential in this presentation gives ${friendlyDid(principal)} (on whose behalf you act) the right to ${req.entry}.`);
