@@ -8,7 +8,9 @@ describe('security headers', () => {
     expect(contentSecurityPolicy({ isDev: false })).toBe(
       "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
         "font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; " +
-        "connect-src 'self' https://*.bioregionalpassport.org https://bioregionalpassport.org; " +
+        "connect-src 'self' https://*.bioregionalpassport.org https://bioregionalpassport.org " +
+        'https://tiles.openfreemap.org https://tile.openstreetmap.org; ' +
+        "worker-src 'self' blob:; child-src blob:; " +
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     );
   });
@@ -26,6 +28,14 @@ describe('security headers', () => {
     ).get('connect-src');
     expect(connect).toEqual(expect.arrayContaining(['https://example.org', 'https://*.example.org', 'https://passport.boulder.coop']));
     expect(connect?.some((s) => s.includes('bad'))).toBe(false);
+  });
+
+  it('lets the pod map fetch tiles and start its blob worker', () => {
+    const d = directives(contentSecurityPolicy({ isDev: false }));
+    expect(d.get('connect-src')).toEqual(expect.arrayContaining(['https://tiles.openfreemap.org', 'https://tile.openstreetmap.org']));
+    expect(d.get('worker-src')).toEqual(["'self'", 'blob:']);
+    expect(d.get('child-src')).toEqual(['blob:']);
+    expect(d.get('img-src')).toContain('https:');
   });
 
   it('sends nosniff, a strict referrer policy and DENY framing', () => {

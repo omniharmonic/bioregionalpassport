@@ -5,7 +5,9 @@
  * Content-Security-Policy baseline (final review, Task 19):
  *   default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
  *   font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:;
- *   connect-src 'self' https://*.bioregionalpassport.org https://bioregionalpassport.org;
+ *   connect-src 'self' https://*.bioregionalpassport.org https://bioregionalpassport.org
+ *     https://tiles.openfreemap.org https://tile.openstreetmap.org;
+ *   worker-src 'self' blob:; child-src blob:;
  *   frame-ancestors 'none'; base-uri 'self'; form-action 'self'
  *
  * Relaxations, each needed by something that ships (documented here, nowhere else):
@@ -18,6 +20,10 @@
  * - connect-src adds `https://<PLATFORM_DOMAIN>` and `https://*.<PLATFORM_DOMAIN>` when PLATFORM_DOMAIN is not the
  *   default, and `https://<domain>` for every custom pod domain in POD_CUSTOM_DOMAINS: the wallet (platform
  *   origin) calls a pod's own origin (`services.*` in its manifest) with credentials.
+ * - connect-src https://tiles.openfreemap.org https://tile.openstreetmap.org: the pod map (MapLibre, Task 20)
+ *   fetches the OpenFreeMap style, vector tiles, sprites and glyphs, and OSM raster fallback tiles.
+ * - worker-src 'self' blob: and child-src blob:: MapLibre starts its worker from a blob URL (child-src for older
+ *   Safari, which ignores worker-src).
  * - development only: script-src 'unsafe-eval' (React dev call stacks / Turbopack HMR) and connect-src for
  *   `http(s)://localhost:*`, `http://*.localhost:*` and `ws(s)://…` (HMR websocket, `<slug>.localhost` pod hosts).
  *
@@ -32,10 +38,12 @@ export interface SecurityHeaderOptions {
 }
 
 const DEFAULT_DOMAIN = 'bioregionalpassport.org';
+/** Map style/tiles/glyphs (OpenFreeMap) and the raster fallback (OSM) used by the pod map. */
+const MAP_TILE_ORIGINS = ['https://tiles.openfreemap.org', 'https://tile.openstreetmap.org'];
 
 export function contentSecurityPolicy(opts: SecurityHeaderOptions): string {
   const domain = (opts.platformDomain?.trim() || DEFAULT_DOMAIN).toLowerCase();
-  const connect = new Set(["'self'", `https://*.${DEFAULT_DOMAIN}`, `https://${DEFAULT_DOMAIN}`, `https://*.${domain}`, `https://${domain}`]);
+  const connect = new Set(["'self'", `https://*.${DEFAULT_DOMAIN}`, `https://${DEFAULT_DOMAIN}`, `https://*.${domain}`, `https://${domain}`, ...MAP_TILE_ORIGINS]);
   for (const pair of (opts.customDomains ?? '').split(',')) {
     const host = pair.split('=')[0]?.trim().toLowerCase();
     if (host && /^[a-z0-9.-]+$/.test(host)) connect.add(`https://${host}`);
@@ -52,6 +60,8 @@ export function contentSecurityPolicy(opts: SecurityHeaderOptions): string {
     "font-src 'self' https://fonts.gstatic.com data:",
     "img-src 'self' data: blob: https:",
     `connect-src ${[...connect].join(' ')}`,
+    "worker-src 'self' blob:",
+    'child-src blob:',
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",

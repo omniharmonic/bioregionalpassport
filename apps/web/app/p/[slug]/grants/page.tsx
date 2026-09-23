@@ -4,7 +4,8 @@ import { Card, EmptyState, Explain, PageHeader, Pill } from '@passport/ui-kit';
 import { loadPod } from '@/lib/pod';
 import { currentPodBase } from '@/lib/podRequest';
 import { STEWARD_SCOPE, can, podSession, trustedName, withRound } from './_lib/data';
-import { PHASE_LABEL, day, money, phaseOf, type RoundPhase } from './_lib/format';
+import { PHASE_LABEL, money, phaseOf, type RoundPhase } from './_lib/format';
+import { podDay, podTimeZone } from '../events/_lib/podTime';
 
 export const dynamic = 'force-dynamic';
 export const metadata: Metadata = { title: 'Grants' };
@@ -34,6 +35,8 @@ const ORDER: RoundPhase[] = ['open', 'upcoming', 'counting', 'published'];
 export default async function GrantsPage({ params }: PageProps<'/p/[slug]/grants'>) {
   const { slug } = await params;
   const pod = await loadPod(slug);
+  const timeZone = podTimeZone(pod.manifest);
+  const day = (iso: string | null) => podDay(iso, timeZone);
   const [rounds, base, session] = await Promise.all([loadRounds(pod), currentPodBase(slug), podSession(pod)]);
   const grouped = new Map<RoundPhase, Listed[]>(ORDER.map((p) => [p, []]));
   for (const r of rounds ?? []) grouped.get(phaseOf(r))!.push(r);

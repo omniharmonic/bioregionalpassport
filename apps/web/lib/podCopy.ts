@@ -1,4 +1,4 @@
-import { copy, type BioregionManifest } from '@passport/tenant-config';
+import { copy, type BioregionManifest, type TrustPolicy } from '@passport/tenant-config';
 
 /** Home greeting in the pod's tone (overridable with `copy.<locale>['home.greeting'|'home.lede']`). */
 export function greeting(manifest: BioregionManifest): { title: string; lede: string } {
@@ -42,12 +42,20 @@ const RULES: Record<string, (n: string) => string> = {
   vmcPairComplete: () => 'Your membership grant and your acknowledgement of it are both on file.',
   witnessedEdges: (n) =>
     n === '1'
-      ? 'At least one of your relationships was witnessed in person at an attestation event.'
-      : `At least ${n} of your relationships were witnessed in person at an attestation event.`,
-  distinctEvents: (n) => `You have met people at ${n} or more different events.`,
+      ? 'At least one of your relationships was witnessed in person.'
+      : `At least ${n} of your relationships were witnessed in person.`,
+  distinctEvents: (n) =>
+    n === '1' ? 'Your relationships were witnessed at a gathering.' : `Your relationships were witnessed at ${n} or more different gatherings.`,
+  distinctWitnesses: (n) =>
+    n === '1' ? 'Your relationships were witnessed by a neighbor.' : `Your relationships were witnessed by ${n} or more different neighbors.`,
+  distinctEventsOrWitnesses: (n) =>
+    n === '1'
+      ? 'Your relationships were witnessed at a gathering or by a neighbor.'
+      : `Your relationships were witnessed at ${n} or more gatherings or by ${n} different neighbors.`,
   weightedEndorsements: (n) => `At least ${n} trusted neighbors have vouched for you.`,
   seedHops: (n) => `You are within ${n} introductions of the pod's founding members.`,
-  spread: (n) => `Your relationships are spread across events rather than concentrated in one (spread of at least ${n}).`,
+  spread: (n) =>
+    `Your relationships were witnessed by different people or at different gatherings rather than all by one (spread of at least ${n}).`,
   electedByGovernance: () => "You were chosen as a steward through the pod's governance process.",
   namedInGovernance: () => "You are named as an anchor in the pod's governance documents.",
 };
@@ -63,4 +71,31 @@ export function describeRule(manifest: BioregionManifest, requirement: string): 
     return `You have held ${tierName(manifest, held[1])} standing for at least ${days} days.`;
   }
   return RULES[metric]?.(value) ?? requirement;
+}
+
+type Tier = 'T1' | 'T2' | 'T3' | 'T4';
+
+/**
+ * The requirement the trust index actually evaluates for a tier: on T2, `distinctEvents>=N` counts distinct
+ * witnesses too unless the policy turns peer witnessing off (the trust index's compatibility rule, Task 21b).
+ */
+export function effectiveTierRule(policy: Pick<TrustPolicy, 'admission'>, tier: Tier, requirement: string): string {
+  if (tier !== 'T2' || policy.admission?.peerWitnessing === false) return requirement;
+  const m = /^distinctEvents>=(.+)$/.exec(requirement.trim());
+  return m ? `distinctEventsOrWitnesses>=${m[1]}` : requirement;
+}
+
+/** One plain sentence for a tier requirement as this pod's policy evaluates it (governance page). */
+export function describeTierRule(manifest: BioregionManifest, policy: Pick<TrustPolicy, 'admission'>, tier: Tier, requirement: string): string {
+  return describeRule(manifest, effectiveTierRule(policy, tier, requirement));
+}
+
+/** Who may witness a relationship, as one sentence, or null when the policy leaves it to event conveners. */
+export function describeWitnessing(manifest: BioregionManifest, policy: Pick<TrustPolicy, 'admission'>): string | null {
+  const admission = policy.admission;
+  const tier = admission?.witnessTier;
+  if (!tier || admission?.peerWitnessing === false) return null;
+  // Only T2 and above hold `vwc:issue`; a T1 floor still means T2 in practice.
+  const floor = tier === 'T1' ? 'T2' : tier;
+  return `Any member at ${tierName(manifest, floor)} standing or above can witness two neighbors' relationship in person, at a gathering or on the spot.`;
 }

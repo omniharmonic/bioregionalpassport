@@ -4,7 +4,8 @@ import { Button, Card, EmptyState, Explain, Notice, PageHeader, Pill, Stat } fro
 import { loadPod } from '@/lib/pod';
 import { currentPodBase } from '@/lib/podRequest';
 import { STEWARD_SCOPE, can, notFoundOn404, podDomain, podSession, trustedName, withRound } from '../_lib/data';
-import { PHASE_LABEL, day, money, phaseOf } from '../_lib/format';
+import { PHASE_LABEL, money, phaseOf } from '../_lib/format';
+import { podDay, podTimeZone } from '../../events/_lib/podTime';
 import { abbreviate } from '../_lib/voting';
 import { VerifyTally } from '../_components/VerifyTally';
 import { VotingIsland } from '../_components/VotingIsland';
@@ -17,6 +18,8 @@ type ShownTally = Tally | Omit<Tally, 'adjustments'>;
 export default async function RoundPage({ params }: PageProps<'/p/[slug]/grants/[id]'>) {
   const { slug, id } = await params;
   const pod = await loadPod(slug);
+  const timeZone = podTimeZone(pod.manifest);
+  const day = (iso: string | null) => podDay(iso, timeZone);
   const [base, session] = await Promise.all([currentPodBase(slug), podSession(pod)]);
   const steward = can(session, STEWARD_SCOPE);
 

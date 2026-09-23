@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { Card, PageHeader, TierBadge, type Tier } from '@passport/ui-kit';
 import { loadPod } from '@/lib/pod';
-import { describeRule, tierName } from '@/lib/podCopy';
+import { describeTierRule, describeWitnessing, tierName } from '@/lib/podCopy';
 
 export const dynamic = 'force-dynamic';
 export const metadata: Metadata = { title: 'Governance' };
@@ -14,6 +14,7 @@ export default async function GovernancePage({ params }: PageProps<'/p/[slug]/go
   const { slug } = await params;
   const { manifest, policy } = await loadPod(slug);
   const gov = manifest.governance;
+  const witnessing = describeWitnessing(manifest, policy);
 
   return (
     <div className="grid gap-12">
@@ -72,7 +73,7 @@ export default async function GovernancePage({ params }: PageProps<'/p/[slug]/go
                 </h3>
                 <ul className="mt-4 grid list-disc gap-2 pl-5">
                   {policy.tiers[t as 'T1' | 'T2' | 'T3' | 'T4'].requires.map((r) => (
-                    <li key={r}>{describeRule(manifest, r)}</li>
+                    <li key={r}>{describeTierRule(manifest, policy, t as 'T1' | 'T2' | 'T3' | 'T4', r)}</li>
                   ))}
                 </ul>
               </Card>
@@ -80,6 +81,7 @@ export default async function GovernancePage({ params }: PageProps<'/p/[slug]/go
           ))}
         </ol>
         <ul className="grid max-w-2xl list-disc gap-2 pl-5 muted">
+          {witnessing ? <li>{witnessing}</li> : null}
           <li>
             Permissions last {policy.vacValidityDays} days and renew for as long as your standing holds.
           </li>
