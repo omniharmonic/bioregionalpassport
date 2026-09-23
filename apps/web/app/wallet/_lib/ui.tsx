@@ -136,8 +136,15 @@ export function describeAction(action: string): string {
   return ACTION_SENTENCES[base] ?? ((AUTHORITY_SCOPES as Record<string, { meaning: string }>)[base]?.meaning ?? action);
 }
 
-const SCOPE_WORDS: Record<string, string> = { 'lives-here': 'lives here', 'worked-with': 'worked with them', knows: 'knows them' };
-export const scopeWords = (scope: unknown): string => SCOPE_WORDS[String(scope)] ?? String(scope);
+/** "I vouch …" — what the voucher states. */
+export function vouchGiven(scope: unknown): string {
+  return ({ 'lives-here': 'that they live here', 'worked-with': 'that I have worked with them', knows: 'that I know them' } as Record<string, string>)[String(scope)] ?? String(scope);
+}
+
+/** "<name> …" — how a received vouch reads to the person it is about. */
+export function vouchReceived(scope: unknown): string {
+  return ({ 'lives-here': 'vouches that you live here', 'worked-with': 'vouches that you worked with them', knows: 'vouches that they know you' } as Record<string, string>)[String(scope)] ?? `vouches: ${String(scope)}`;
+}
 
 export interface DescribeOpts {
   /** Local nickname of a contact. */
@@ -167,7 +174,9 @@ export function describeCredential(row: CredentialRow, manifest: BioregionManife
     case 'endorsement': {
       const given = opts.mine?.(row.issuer) ?? false;
       return {
-        title: `${given ? 'Your vouch for' : 'Vouch from'} ${who(given ? String(s.id ?? '') : row.issuer)}: ${scopeWords(s['object']?.value?.scope)}`,
+        title: given
+          ? `You vouch ${vouchGiven(s['object']?.value?.scope)} (${who(String(s.id ?? ''))})`
+          : `${who(row.issuer).replace(/^a /, 'A ')} ${vouchReceived(s['object']?.value?.scope)}`,
         explain: 'A vouch is evidence only; the person who receives it chooses whether to count it in the trust index.',
       };
     }

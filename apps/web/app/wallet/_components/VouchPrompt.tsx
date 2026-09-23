@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Button, Card, Field, Input, Notice } from '@passport/ui-kit';
 import { ENDORSEMENT_SCOPES, type ContactRow, type VouchScope } from '@passport/pod-client';
 import { useWalletState } from '../_lib/WalletContext';
-import { Did, ErrorNotice, scopeWords, useAction } from '../_lib/ui';
+import { Did, ErrorNotice, useAction, vouchGiven } from '../_lib/ui';
 
 /** After meeting: a local nickname, and an optional vouch (scope lives-here / worked-with / knows). */
 export function VouchPrompt({ contact, onDone }: { contact: ContactRow; onDone?: () => void }) {
@@ -44,7 +44,7 @@ export function VouchPrompt({ contact, onDone }: { contact: ContactRow; onDone?:
         </label>
         {ENDORSEMENT_SCOPES.map((s) => (
           <label key={s} className="flex items-center gap-2 text-sm">
-            <input type="radio" name="vp-scope" checked={scope === s} onChange={() => setScope(s)} /> I vouch that they {scopeWords(s)}
+            <input type="radio" name="vp-scope" checked={scope === s} onChange={() => setScope(s)} /> I vouch {vouchGiven(s)}
           </label>
         ))}
       </fieldset>

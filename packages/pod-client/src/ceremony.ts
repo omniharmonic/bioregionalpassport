@@ -1,7 +1,6 @@
 import {
   buildEndorsement,
   buildRelationship,
-  createResolver,
   digestMultibase,
   randomNonce,
   signDocument,
@@ -15,7 +14,7 @@ import { parseMessage, type OobInviteMessage } from '@passport/lexicons';
 import type { ContactRow } from './db.js';
 import type { PodClient } from './client.js';
 import type { RelayMessage, RelayTransport } from './relay.js';
-import { channelFor, eventChannel, sleep } from './util.js';
+import { channelFor, defaultResolver, eventChannel, sleep } from './util.js';
 import type { Wallet } from './wallet.js';
 
 export const ENDORSEMENT_SCOPES = ['lives-here', 'worked-with', 'knows'] as const;
@@ -47,6 +46,9 @@ export interface HostSession {
   inviteJson: string;
   myDid: string;
   lastSeq: number;
+  /** Offers that arrived but did not check out (ignored); the last reason, for display. */
+  rejected?: number;
+  lastRejection?: string;
 }
 
 export interface JoinSession {
@@ -82,6 +84,16 @@ type Signed = VerifiableCredential & { proof: DataIntegrityProof };
 export function pairDigest(x: VerifiableCredential, y: VerifiableCredential): string {
   const [a, b] = [digestMultibase(x), digestMultibase(y)].sort() as [string, string];
   return digestMultibase({ a, b });
+}
+
+/** A relay message whose body is a valid B3 §5 ceremony message; malformed bodies are skipped, never trusted. */
+function valid(m: RelayMessage): (RelayMessage & { body: Record<string, any> }) | undefined {
+  try {
+    parseMessage(m.body);
+    return m as RelayMessage & { body: Record<string, any> };
+  } catch {
+    return undefined;
+  }
 }
 
 const isType = (v: any, t: string) => Array.isArray(v?.type) && v.type.includes('VerifiableCredential') && v.type.includes(t);
@@ -125,7 +137,7 @@ export class Ceremony {
     this.relay = opts.relay;
     this.pod = opts.pod;
     this.identity = opts.identity ?? 'persona';
-    this.resolver = opts.resolver ?? createResolver();
+    this.resolver = opts.resolver ?? defaultResolver();
   }
 
   private async myKey(): Promise<KeyPair> {
@@ -218,10 +230,19 @@ export class Ceremony {
   /** One poll: when the joiner's offer has arrived, signs my half back and stores the relationship. */
   async pollHost(session: HostSession): Promise<Met | null> {
     const msgs = await this.relay.list(session.channel, session.lastSeq);
-    for (const m of msgs) {
-      session.lastSeq = Math.max(session.lastSeq, m.seq);
-      if (m.body?.type !== 'org.bioregion.vrc.offer' || m.sender === session.myDid) continue;
-      const theirs = await this.checkHalf(m.body.vrc, { subject: session.myDid });
+    for (const raw of msgs) {
+      session.lastSeq = Math.max(session.lastSeq, raw.seq);
+      const m = valid(raw);
+      if (!m || m.body.type !== 'org.bioregion.vrc.offer' || m.sender === session.myDid) continue;
+      let theirs: Signed;
+      try {
+        theirs = await this.checkHalf(m.body.vrc, { subject: session.myDid });
+      } catch (e) {
+        // Anyone who saw the QR could post here: a bad offer is ignored and we keep waiting for the real one.
+        session.rejected = (session.rejected ?? 0) + 1;
+        session.lastRejection = e instanceof Error ? e.message : String(e);
+        continue;
+      }
       const me = await this.keyOf(session.myDid);
       const mine = this.signHalf(me, theirs.issuer, String(theirs.credentialSubject['formedAt'] ?? this.wallet.now().toISOString()));
       await this.relay.post(session.channel, me.did, { type: 'org.bioregion.vrc.accept', ...(await this.envelope(me.did)), vrc: mine });
@@ -266,10 +287,16 @@ export class Ceremony {
   /** One poll: when the host's accept has arrived, stores the relationship. */
   async pollJoin(session: JoinSession): Promise<Met | null> {
     const msgs = await this.relay.list(session.channel, session.lastSeq);
-    for (const m of msgs) {
-      session.lastSeq = Math.max(session.lastSeq, m.seq);
-      if (m.body?.type !== 'org.bioregion.vrc.accept' || m.sender === session.myDid) continue;
-      const theirs = await this.checkHalf(m.body.vrc, { subject: session.myDid, issuer: session.invite.pairwiseDid });
+    for (const raw of msgs) {
+      session.lastSeq = Math.max(session.lastSeq, raw.seq);
+      const m = valid(raw);
+      if (!m || m.body.type !== 'org.bioregion.vrc.accept' || m.sender === session.myDid) continue;
+      let theirs: Signed;
+      try {
+        theirs = await this.checkHalf(m.body.vrc, { subject: session.myDid, issuer: session.invite.pairwiseDid });
+      } catch {
+        continue;
+      }
       const vecIn = await this.checkVec(m.body.vec, { issuer: theirs.issuer, subject: session.myDid });
       return this.saveRelationship({
         myDid: session.myDid,
@@ -328,9 +355,10 @@ export class Ceremony {
       if (!msgs.length) continue;
       let lastSeq = c.lastSeq ?? 0;
       let vecIn = c.vecIn;
-      for (const m of msgs) {
-        lastSeq = Math.max(lastSeq, m.seq);
-        if (m.sender !== c.did || !m.body?.vec) continue;
+      for (const raw of msgs) {
+        lastSeq = Math.max(lastSeq, raw.seq);
+        const m = valid(raw);
+        if (!m || m.sender !== c.did || !m.body.vec) continue;
         const vec = await this.checkVec(m.body.vec, { issuer: c.did, subject: c.myDid });
         if (vec && digestMultibase(vec) !== (vecIn ? digestMultibase(vecIn) : '')) {
           vecIn = vec;
@@ -375,20 +403,35 @@ export class Ceremony {
     return { queued: !!r.queued, edgeDigest };
   }
 
-  /** Convener view: open witness requests at an event (not yet answered), one per relationship. */
+  /**
+   * A `witness.result` VWC is trusted only when it is a pod-signed (`verifyDocument` against the pod's DID)
+   * `dtg:witnessed` statement for this event and `edgeDigest`. The event channel is readable and writable by
+   * anyone who knows the event, so anything else is ignored.
+   */
+  async verifyWitnessResult(vwc: unknown, event: { id: string }, edgeDigest: string): Promise<VerifiableCredential | undefined> {
+    const podDid = (await this.wallet.pod(this.pod))?.did;
+    if (!podDid || !isType(vwc, 'StatementCredential') || !(vwc as Signed).proof) return undefined;
+    const v = vwc as Signed;
+    const subj = v.credentialSubject ?? ({} as Record<string, any>);
+    if (v.issuer !== podDid || subj['predicate'] !== 'dtg:witnessed' || subj['taskContext'] !== event.id || subj['object']?.digestMultibase !== edgeDigest) return undefined;
+    const r = await verifyDocument(v, this.resolver, { proofPurpose: 'assertionMethod' }).catch(() => ({ ok: false, controller: undefined }));
+    return r.ok && r.controller === podDid ? v : undefined;
+  }
+
+  /** Convener view: open witness requests at an event (not yet validly answered), one per relationship. */
   async listWitnessRequests(event: { id: string; taskDigest?: string | null }): Promise<WitnessRequest[]> {
-    const msgs = await this.listAll(eventChannel(event));
+    const msgs = (await this.listAll(eventChannel(event))).map(valid).filter((m): m is RelayMessage & { body: Record<string, any> } => !!m);
     const answered = new Set<string>();
     for (const m of msgs) {
-      if (m.body?.type === 'org.bioregion.witness.result') {
-        const d = m.body.vwc?.credentialSubject?.object?.digestMultibase;
-        if (typeof d === 'string') answered.add(d);
-      }
+      if (m.body.type !== 'org.bioregion.witness.result') continue;
+      const d = m.body.vwc?.credentialSubject?.object?.digestMultibase;
+      // A forged "answer" must not hide a real request from the convener.
+      if (typeof d === 'string' && !answered.has(d) && (await this.verifyWitnessResult(m.body.vwc, event, d))) answered.add(d);
     }
     const open = new Map<string, WitnessRequest>();
     for (const m of msgs) {
       const b = m.body;
-      if (b?.type !== 'org.bioregion.witness.request' || b.taskContext !== event.id || answered.has(b.edgeDigest)) continue;
+      if (b.type !== 'org.bioregion.witness.request' || b.taskContext !== event.id || answered.has(b.edgeDigest)) continue;
       if (!isType(b.vrcA, 'RelationshipCredential') || !isType(b.vrcB, 'RelationshipCredential')) continue;
       if (pairDigest(b.vrcA, b.vrcB) !== b.edgeDigest) continue;
       if (!open.has(b.edgeDigest)) {
@@ -411,19 +454,18 @@ export class Ceremony {
     return vwc;
   }
 
-  /** Applicant: looks for the convener's `witness.result` for my relationship with `contactDid`; stores the VWC. */
+  /** Applicant (or the other party): looks for a verified `witness.result` for my relationship; stores the VWC. */
   async pollWitnessResult(event: { id: string; taskDigest?: string | null }, contactDid: string): Promise<VerifiableCredential | undefined> {
     const c = await this.wallet.contact(contactDid);
     if (!c?.vrcOut || !c.vrcIn) return undefined;
     if (c.vwc) return c.vwc;
     const edge = pairDigest(c.vrcOut, c.vrcIn);
-    const podDid = (await this.wallet.pod(this.pod))?.did;
-    for (const m of await this.listAll(eventChannel(event))) {
-      const vwc = m.body?.type === 'org.bioregion.witness.result' ? (m.body.vwc as VerifiableCredential) : undefined;
-      if (vwc?.credentialSubject?.['object']?.digestMultibase !== edge) continue;
-      // Only the pod issues witness credentials; the pod re-verifies its own signature when we apply, so a
-      // forged result here only costs a refused application.
-      if (!isType(vwc, 'StatementCredential') || vwc.issuer !== podDid || vwc.credentialSubject['taskContext'] !== event.id) continue;
+    const refused = new Set(c.refusedVwcs ?? []);
+    for (const raw of await this.listAll(eventChannel(event))) {
+      const m = valid(raw);
+      if (!m || m.body.type !== 'org.bioregion.witness.result') continue;
+      const vwc = await this.verifyWitnessResult(m.body.vwc, event, edge);
+      if (!vwc || refused.has(digestMultibase(vwc))) continue;
       await this.wallet.updateContact(contactDid, { vwc });
       await this.wallet.storeCredential(vwc, { pod: this.pod });
       return vwc;

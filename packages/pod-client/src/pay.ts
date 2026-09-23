@@ -1,5 +1,6 @@
 import { createPresentation, signDocument, type KeyPair, type VerifiableCredential } from '@passport/credential-core';
 import { PayRequestMessageSchema, type PayRequestMessage } from '@passport/lexicons';
+import type { BioregionManifest } from '@passport/tenant-config';
 import type { PodClient } from './client.js';
 import { withSession } from './membership.js';
 import { podDomainOf } from './util.js';
@@ -16,6 +17,16 @@ export function parsePaymentRequest(text: string): PayRequestMessage & Record<st
   const r = PayRequestMessageSchema.safeParse(raw);
   if (!r.success) throw new Error('That code is not a payment request.');
   return raw as PayRequestMessage & Record<string, any>;
+}
+
+/** One sentence when a payment request should not be signed in this pod, else undefined. */
+export function checkPaymentRequest(request: PayRequestMessage, manifest: BioregionManifest, now: Date = new Date()): string | undefined {
+  if (request.pod !== manifest.identity.did) return `This payment request is not from ${manifest.identity.name}.`;
+  if (request.amount.unit !== manifest.currency.unit) return `This payment request asks for ${request.amount.unit}, but ${manifest.identity.name} uses ${manifest.currency.unit}s.`;
+  if (!(request.amount.value > 0)) return 'This payment request is for nothing.';
+  if (request.amount.value > request.totalSale.value) return 'This payment request asks for more credits than the whole sale.';
+  if (Date.parse(request.expires) <= now.getTime()) return 'This payment request has expired; ask the merchant to ring it up again.';
+  return undefined;
 }
 
 /**
@@ -41,8 +52,8 @@ export async function payRequest(wallet: Wallet, client: PodClient, request: Pay
   const pod = await wallet.pod(client.slug);
   const persona = await wallet.personaFor(client.slug);
   if (!pod || !persona) throw new Error('Join this pod in your passport first.');
-  if (request.pod !== pod.did) throw new Error('This payment request is for a different pod.');
-  if (Date.parse(request.expires) <= wallet.now().getTime()) throw new Error('This payment request has expired; ask the merchant to ring it up again.');
+  const problem = checkPaymentRequest(request, pod.manifest, wallet.now());
+  if (problem) throw new Error(problem);
   const creds = await wallet.selectFor(client.slug, request.acceptance.requires);
   const authorization = buildPayAuthorization(persona, request, creds, podDomainOf(client.slug, pod.did), wallet.now());
   return withSession(wallet, client, () => client.payAuthorize(authorization));

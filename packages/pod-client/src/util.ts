@@ -1,5 +1,5 @@
 import { sha256 } from '@noble/hashes/sha2.js';
-import { toBase58btc, type VerifiableCredential } from '@passport/credential-core';
+import { createResolver, toBase58btc, type DidResolver, type VerifiableCredential } from '@passport/credential-core';
 
 const te = new TextEncoder();
 export const utf8 = (s: string): Uint8Array => te.encode(s);
@@ -139,3 +139,26 @@ export const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
       reject(new DOMException('Stopped.', 'AbortError'));
     }, { once: true });
   });
+
+/** `include` for absolute URLs (another origin), `same-origin` for relative ones. */
+export const credentialsFor = (url: string): RequestCredentials => (/^https?:\/\//i.test(url) ? 'include' : 'same-origin');
+
+let sharedResolver: DidResolver | undefined;
+
+/**
+ * The wallet's DID resolver: did:key inline; did:web documents fetched from the page's own origin
+ * (`/dids/<slug>/did.json`, which the platform app serves for every pod) when running in a browser, else from the
+ * did:web URL. Documents are cached for 5 minutes (credential-core's resolver cache).
+ */
+export function defaultResolver(): DidResolver {
+  sharedResolver ??= createResolver({
+    webFetch: async (url: string) => {
+      const loc = (globalThis as { location?: { origin?: string } }).location;
+      const target = loc?.origin ? `${loc.origin}${new URL(url).pathname}` : url;
+      const res = await fetch(target, { headers: { accept: 'application/did+json, application/json' } });
+      if (!res.ok) throw new Error(`Could not resolve ${url} (${res.status}).`);
+      return res.json();
+    },
+  });
+  return sharedResolver;
+}

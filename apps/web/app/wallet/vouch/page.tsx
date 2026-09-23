@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Button, Card, EmptyState, Explain, Field, Notice, PageHeader, Select } from '@passport/ui-kit';
 import { ENDORSEMENT_SCOPES, optInToIndex, type ContactRow, type VouchScope } from '@passport/pod-client';
 import { useWalletState } from '../_lib/WalletContext';
-import { Did, ErrorNotice, Section, formatDate, scopeWords, useAction } from '../_lib/ui';
+import { Did, ErrorNotice, Section, formatDate, useAction, vouchGiven, vouchReceived } from '../_lib/ui';
 
 /**
  * F4 Vouch: contact → scope → sign → VEC delivered to them. Evidence only. Vouches you receive count in the trust
@@ -37,7 +37,7 @@ export default function VouchPage() {
     const ceremony = await w.ceremonyFor();
     const r = await ceremony.vouch(who, scope);
     const c = contacts.find((x) => x.did === who);
-    setNote(`${r.queued ? 'Signed; it will be delivered when you are back online' : 'Signed and sent'}: you vouch that ${c?.name ?? 'they'} ${scopeWords(scope)}.`);
+    setNote(`${r.queued ? 'Signed; it will be delivered when you are back online' : 'Signed and sent'}: you vouch ${vouchGiven(scope)}${c?.name ? ` (${c.name})` : ''}.`);
     await load();
   });
 
@@ -71,7 +71,7 @@ export default function VouchPage() {
             <legend className="text-sm font-medium">What you vouch for</legend>
             {ENDORSEMENT_SCOPES.map((s) => (
               <label key={s} className="flex items-center gap-2 text-sm">
-                <input type="radio" name="v-scope" checked={scope === s} onChange={() => setScope(s)} /> They {scopeWords(s)}
+                <input type="radio" name="v-scope" checked={scope === s} onChange={() => setScope(s)} /> I vouch {vouchGiven(s)}
               </label>
             ))}
           </fieldset>
@@ -98,7 +98,7 @@ export default function VouchPage() {
                 <li key={c.did}>
                   <Card className="flex flex-wrap items-center justify-between gap-3 p-4">
                     <span className="text-sm">
-                      <strong>{c.name ?? 'A neighbor'}</strong> <Did did={c.did} /> vouches that you {scopeWords(s)}
+                      <strong>{c.name ?? 'A neighbor'}</strong> <Did did={c.did} /> {vouchReceived(s)}
                     </span>
                     {counted ? (
                       <span className="text-sm muted">Counted in the trust index</span>

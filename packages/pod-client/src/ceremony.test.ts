@@ -1,10 +1,13 @@
 import 'fake-indexeddb/auto';
-import { digestMultibase, randomNonce } from '@passport/credential-core';
+import { buildMembershipGrant, buildWitness, createResolver, didWebDocument, digestMultibase, generateKeyPair, keyPairForDid, randomNonce, signDocument, type KeyPair } from '@passport/credential-core';
 import { boulderManifest } from '@passport/tenant-config';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Ceremony, pairDigest, parseInvite } from './ceremony.js';
 import { MemoryRelay } from './relay.js';
 import { eventChannel } from './util.js';
+import { verifyGrant } from './membership.js';
+
+const POD_DID = boulderManifest.identity.did;
 import { createWallet, type Wallet } from './wallet.js';
 
 const open: Wallet[] = [];
@@ -76,13 +79,64 @@ describe('ceremony over a relay', () => {
     const host = new Ceremony({ wallet: alice, relay, pod: 'boulder' });
     const s = await host.host();
     await expect(new Ceremony({ wallet: alice, relay, pod: 'boulder' }).join(s.inviteJson)).rejects.toThrow('This is your own code');
-    // Mallory offers a half made out to someone else on Alice's channel.
+    // Mallory offers a half made out to someone else on Alice's channel, then a malformed body: both are ignored
+    // and hosting continues until the real offer arrives.
     const other = await phone();
     const otherSession = await new Ceremony({ wallet: other, relay, pod: 'boulder' }).host();
     const j = await new Ceremony({ wallet: mallory, relay, pod: 'boulder' }).join(otherSession.inviteJson);
     await relay.post(s.channel, j.myDid, { type: 'org.bioregion.vrc.offer', createdAt: new Date().toISOString(), seq: 9, vrc: j.vrcOut });
-    await expect(host.pollHost(s)).rejects.toThrow('made out to someone else');
+    const r = relay as unknown as { seq: number };
+    relay.channels.get(s.channel)!.push({ seq: ++r.seq, sender: 'x', body: { type: 'org.bioregion.vrc.offer', vrc: 'nonsense' }, createdAt: new Date().toISOString() });
+    expect(await host.pollHost(s)).toBeNull();
+    expect(s.rejected).toBe(1);
+    expect(s.lastRejection).toMatch('made out to someone else');
+    const real = await phone();
+    const realJoin = new Ceremony({ wallet: real, relay, pod: 'boulder' });
+    const rj = await realJoin.join(s.inviteJson);
+    const met = await host.waitForOffer(s, { intervalMs: 5 });
+    expect(met.contact.did).toBe(rj.myDid);
     await expect(new Ceremony({ wallet: alice, relay, pod: 'boulder' }).join('{"hello":1}')).rejects.toThrow('not a passport invitation');
+  });
+
+  it('trusts only pod-signed witness results for my relationship, and verifies membership offers', async () => {
+    const relay = new MemoryRelay();
+    const podKey = keyPairForDid(POD_DID, generateKeyPair().privateKey);
+    const resolver = createResolver({ staticDocs: { [POD_DID]: didWebDocument(POD_DID, podKey.publicKeyMultibase) } });
+    const a = await phone();
+    const b = await phone();
+    const ca = new Ceremony({ wallet: a, relay, pod: 'boulder', resolver });
+    const cb = new Ceremony({ wallet: b, relay, pod: 'boulder', resolver });
+    const s = await cb.host();
+    const j = await ca.join(s.inviteJson);
+    const met = (await cb.pollHost(s))!;
+    await ca.pollJoin(j);
+    const bDid = met.vrcOut.issuer;
+    const event = { id: 'evt_w', taskDigest: 'zTask' };
+    await ca.requestWitness(event, bDid);
+    const vwcFor = (key: KeyPair, edge: string) =>
+      signDocument(
+        { ...buildWitness({ issuer: POD_DID, edgeDigest: edge, taskContext: event.id, taskDigest: 'zTask', evidence: 'same-event', validUntil: new Date(Date.now() + 86_400_000).toISOString() }) },
+        key,
+      );
+    const post = (vwc: unknown) => relay.post(eventChannel(event), 'someone', { type: 'org.bioregion.witness.result', createdAt: new Date().toISOString(), seq: 1, vwc });
+    // Forged: claims the pod as issuer but is signed by another key; and a real pod signature over another edge.
+    await post(vwcFor(keyPairForDid(POD_DID, generateKeyPair().privateKey), met.edgeDigest));
+    await post(vwcFor(podKey, 'zSomeOtherEdge'));
+    expect(await ca.pollWitnessResult(event, bDid)).toBeUndefined();
+    expect(await cb.listWitnessRequests(event)).toHaveLength(1); // forged answers do not hide the request
+    await post(vwcFor(podKey, met.edgeDigest));
+    expect(await ca.pollWitnessResult(event, bDid)).toMatchObject({ issuer: POD_DID });
+    expect(await cb.listWitnessRequests(event)).toHaveLength(0);
+
+    // Membership offers: only a pod-signed grant to my persona from a pod I joined.
+    const persona = (await a.personaFor('boulder'))!.did;
+    const grantTo = (member: string, key: KeyPair = podKey) =>
+      signDocument(buildMembershipGrant({ pod: POD_DID, member, bioregion: 'boulder', placeIds: [], governance: 'https://g', validUntil: new Date(Date.now() + 86_400_000).toISOString() }), key);
+    expect((await verifyGrant(a, grantTo(persona), resolver)).slug).toBe('boulder');
+    await expect(verifyGrant(a, grantTo(persona, keyPairForDid(POD_DID, generateKeyPair().privateKey)), resolver)).rejects.toThrow('not signed by Boulder Commons');
+    await expect(verifyGrant(a, grantTo('did:key:z6MkSomeoneElse'), resolver)).rejects.toThrow('made out to a different identifier');
+    const stranger = { ...grantTo(persona), issuer: 'did:web:example.org:dids:elsewhere' };
+    await expect(verifyGrant(a, stranger, resolver)).rejects.toThrow('not from a pod your passport has joined');
   });
 
   it('can sign with a pairwise identifier instead of the persona', async () => {

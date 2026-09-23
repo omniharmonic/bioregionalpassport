@@ -88,6 +88,8 @@ export interface ContactRow {
   vecIn?: VerifiableCredential;
   /** Set when I asked a convener to witness this relationship ("I'm here"). */
   witnessRequested?: { event: string; at: string };
+  /** Digests of witness credentials the pod refused at apply (never picked up again). */
+  refusedVwcs?: string[];
   /** The pod's witness credential for this relationship. */
   vwc?: VerifiableCredential;
   /** Trust-index commitments made for this relationship (opt in). */

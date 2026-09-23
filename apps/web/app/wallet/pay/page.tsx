@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button, Card, Explain, Notice, PageHeader } from '@passport/ui-kit';
-import { abbreviateDid, parsePaymentRequest, payRequest } from '@passport/pod-client';
+import { abbreviateDid, checkPaymentRequest, parsePaymentRequest, payRequest } from '@passport/pod-client';
 import { useWalletState } from '../_lib/WalletContext';
 import { Scanner } from '../_lib/Scanner';
 import { ErrorNotice, formatDate, useAction } from '../_lib/ui';
@@ -19,6 +19,27 @@ export default function PayPage() {
   const [request, setRequest] = useState<Request | null>(null);
   const [scanError, setScanError] = useState<unknown>(null);
   const [receipt, setReceipt] = useState<{ receipt: any; balance?: number } | null>(null);
+
+  // Enterprise names from the pod directory (fetched once), so the merchant is shown by name when listed.
+  const [names, setNames] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const client = await w.clientFor();
+        const r = await client.get<{ entries: { record?: { did?: string; name?: string } }[] }>('appview', '/directory');
+        const map: Record<string, string> = {};
+        for (const e of r.entries ?? []) if (e.record?.did && e.record.name) map[e.record.did] = e.record.name;
+        if (live) setNames(map);
+      } catch {
+        // Without the directory the merchant is shown by its abbreviated identifier.
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [w]);
+  const merchantName = (did: string) => names[did] ?? abbreviateDid(did);
 
   const pay = useAction(async () => {
     const client = await w.clientFor();
@@ -41,7 +62,7 @@ export default function PayPage() {
           </p>
           <dl className="grid gap-1 text-sm sm:grid-cols-[8rem_1fr]">
             <dt className="muted">To</dt>
-            <dd>{abbreviateDid(r.payee)}</dd>
+            <dd>{merchantName(r.payee)}</dd>
             <dt className="muted">Invoice</dt>
             <dd>{r.invoice}</dd>
             <dt className="muted">When</dt>
@@ -76,7 +97,7 @@ export default function PayPage() {
 
   if (request) {
     const rest = Math.max(0, Math.round((request.totalSale.value - request.amount.value) * 100) / 100);
-    const wrongPod = request.pod !== w.pod.did;
+    const problem = checkPaymentRequest(request, manifest);
     return (
       <div className="grid gap-6">
         <PageHeader title="Confirm payment" />
@@ -86,7 +107,7 @@ export default function PayPage() {
           </p>
           <dl className="grid gap-1 text-sm sm:grid-cols-[8rem_1fr]">
             <dt className="muted">To</dt>
-            <dd>{abbreviateDid(request.merchant)}</dd>
+            <dd>{merchantName(request.merchant)}</dd>
             <dt className="muted">Sale total</dt>
             <dd>
               {request.totalSale.value} {request.totalSale.unit}
@@ -98,10 +119,10 @@ export default function PayPage() {
             You pay {request.amount.value} {request.amount.unit} of a {request.totalSale.value} {request.totalSale.unit} sale; the remaining {rest}{' '}
             {request.totalSale.unit} goes on the merchant’s usual payment.
           </Explain>
-          {wrongPod ? <Notice kind="error">This payment request is for a different pod than the one your passport is showing.</Notice> : null}
+          {problem ? <Notice kind="error">{problem}</Notice> : null}
           <ErrorNotice error={pay.error} />
           <div className="flex flex-wrap gap-3">
-            <Button size="lg" onClick={() => void pay.run()} disabled={pay.busy || wrongPod}>
+            <Button size="lg" onClick={() => void pay.run()} disabled={pay.busy || !!problem}>
               {pay.busy ? 'Signing…' : 'Sign and pay'}
             </Button>
             <Button variant="ghost" onClick={() => setRequest(null)}>

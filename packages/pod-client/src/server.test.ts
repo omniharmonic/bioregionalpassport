@@ -31,7 +31,7 @@ async function phone() {
   await wallet.addPod(boulderManifest, persona.did);
   const fetch = h.fetchFor();
   const client = new PodClient({ slug: SLUG, manifest: boulderManifest, baseUrl: '', fetch, persona, db: wallet.db });
-  return { wallet, persona, client, jar: fetch.jar, ceremony: new Ceremony({ wallet, relay: client.relay(), pod: SLUG }) };
+  return { wallet, persona, client, jar: fetch.jar, ceremony: new Ceremony({ wallet, relay: client.relay(), pod: SLUG, resolver: h.deps.resolver }) };
 }
 
 describe('wallet payloads against the real pod VTA', () => {
@@ -73,8 +73,9 @@ describe('wallet payloads against the real pod VTA', () => {
     const vwc = await carol.ceremony.witness(carol.client, ev, requests[0]!);
     expect(vwc).toMatchObject({ issuer: POD_DID, credentialSubject: { predicate: 'dtg:witnessed', witnessedBy: carol.persona.did, object: { digestMultibase: aliceMet!.edgeDigest } } });
     expect(await carol.ceremony.listWitnessRequests(ev)).toHaveLength(0);
-    const again = await carol.client.witness(ev.id, requests[0]!.vrcA, requests[0]!.vrcB).catch((e) => e);
-    expect(again).toMatchObject({ status: 409, code: 'ALREADY_WITNESSED', message: 'This relationship has already been witnessed in this pod.' });
+    // Re-witnessing (e.g. after a lost response) gives the convener the stored VWC back, never a second edge.
+    const again = await carol.client.witness(ev.id, requests[0]!.vrcA, requests[0]!.vrcB);
+    expect(digestMultibase(again)).toBe(digestMultibase(vwc));
     expect(await alice.ceremony.pollWitnessResult(ev, bob.persona.did)).toMatchObject({ issuer: POD_DID });
 
     // A non-convener cannot witness: the server's one-sentence gate comes back as a PodError.
@@ -83,11 +84,24 @@ describe('wallet payloads against the real pod VTA', () => {
     expect(err.status).toBe(401);
     expect(err.message).toBe('You need to present your passport before doing this.');
 
+    // A witness credential the pod refuses is dropped and never picked up again; polling resumes.
+    const good = (await alice.wallet.contact(bob.persona.did))!.vwc!;
+    const tampered = { ...good, credentialSubject: { ...good.credentialSubject, evidence: 'liveness' } };
+    await alice.wallet.updateContact(bob.persona.did, { vwc: tampered });
+    await expect(applyForMembership(alice.wallet, alice.client, bob.persona.did)).rejects.toMatchObject({ code: 'WITNESS_INVALID' });
+    const afterRefusal = await alice.wallet.contact(bob.persona.did);
+    expect(afterRefusal!.vwc).toBeUndefined();
+    expect(afterRefusal!.refusedVwcs).toEqual([digestMultibase(tampered)]);
+    expect(await alice.ceremony.pollWitnessResult(ev, bob.persona.did)).toMatchObject({ issuer: POD_DID });
+
     // Apply → grant (not yet a member) → consent → ack → T1 VACs.
     const grant = await applyForMembership(alice.wallet, alice.client, bob.persona.did);
     expect(grant).toMatchObject({ issuer: POD_DID, credentialSubject: { id: alice.persona.did, bioregion: SLUG, governance: boulderManifest.governance.url } });
     expect(await alice.wallet.membership(SLUG)).toBeUndefined();
-    const accepted = await acceptMembership(alice.wallet, alice.client, grant);
+    const forged = { ...grant, validUntil: new Date(Date.now() + 80 * 86_400_000).toISOString() };
+    await expect(acceptMembership(alice.wallet, alice.client, forged, { resolver: h.deps.resolver })).rejects.toThrow('This membership offer is not signed by Boulder Commons.');
+    await expect(acceptMembership(bob.wallet, bob.client, grant, { resolver: h.deps.resolver })).rejects.toThrow('was made out to a different identifier');
+    const accepted = await acceptMembership(alice.wallet, alice.client, grant, { resolver: h.deps.resolver });
     expect(accepted.member).toMatchObject({ did: alice.persona.did, tier: 'T1' });
     expect([...(accepted.vacs[0]!.credentialSubject['authority'].actions as string[])].sort()).toEqual([...tierDefaultActions('T1')].sort());
     expect(accepted.explanation).toContain('Your membership pair is complete.');
@@ -111,6 +125,10 @@ describe('wallet payloads against the real pod VTA', () => {
     // Opt in: the witnessed relationship counts toward the trust index.
     const c = await optInToIndex(alice.wallet, alice.client, bob.persona.did, 'relationship');
     expect(c.accepted).toBe(1);
+    // A retry re-posts the same (deterministically salted) commitment: counted once.
+    const retry = await optInToIndex(alice.wallet, alice.client, bob.persona.did, 'relationship');
+    expect(retry).toEqual({ accepted: 0, duplicates: 1 });
+    expect((await alice.wallet.contact(bob.persona.did))!.committed).toHaveLength(1);
 
     // "Why this tier": refresh explains and names what would change it.
     const r = await refreshTier(alice.wallet, alice.client);

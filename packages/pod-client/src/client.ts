@@ -12,7 +12,7 @@ import type { Tier } from '@passport/vocab';
 import type { WalletDb } from './db.js';
 import { ensureOk, Outbox, readBody, type FetchLike } from './outbox.js';
 import type { RelayMessage, RelayTransport } from './relay.js';
-import { PodError, platformDomainOf, podDomainOf } from './util.js';
+import { credentialsFor, PodError, platformDomainOf, podDomainOf } from './util.js';
 
 export type ServiceName = 'vta' | 'index' | 'appview' | 'gateway' | 'registry' | 'round';
 
@@ -76,8 +76,11 @@ export interface PodClientOptions {
 }
 
 /**
- * Same origin when the page is served by the platform app itself (the platform host, a pod sub-domain or
- * localhost): every service is mounted there under `/api/<service>` (ADR-26).
+ * Same origin only when the page is served from the platform host itself (or localhost in development): there
+ * every pod is reachable as `/api/<service>` with an `X-Pod` header. On any other host — including another pod's
+ * sub-domain — the client calls the pod's own origin (`services.*` in its manifest, i.e.
+ * `https://<slug>.<platform>/api/...`) with `credentials: 'include'`, so one pod's credentials and session are
+ * never sent to a different pod's host.
  */
 export function isSameOrigin(manifest: BioregionManifest, origin: string | undefined): boolean {
   if (!origin) return false;
@@ -87,10 +90,9 @@ export function isSameOrigin(manifest: BioregionManifest, origin: string | undef
   } catch {
     return false;
   }
+  if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return true;
   const platform = platformDomainOf(manifest.identity.did)?.split(':')[0]?.toLowerCase();
-  if (host === 'localhost' || host.endsWith('.localhost') || host === '127.0.0.1') return true;
-  if (platform && (host === platform || host.endsWith(`.${platform}`))) return true;
-  return host === manifest.identity.handleDomain?.toLowerCase();
+  return !!platform && host === platform;
 }
 
 /** Browser client for one pod's services, bound to its manifest (and optionally a persona). */
@@ -181,7 +183,7 @@ export class PodClient {
   }
 
   private async direct(req: { url: string; method: string; headers?: Record<string, string>; body?: unknown }): Promise<{ status: number; body: any }> {
-    const init: RequestInit = { method: req.method, headers: { accept: 'application/json', ...(req.headers ?? {}) }, credentials: 'same-origin' };
+    const init: RequestInit = { method: req.method, headers: { accept: 'application/json', ...(req.headers ?? {}) }, credentials: credentialsFor(req.url) };
     if (req.body !== undefined) {
       init.body = JSON.stringify(req.body);
       (init.headers as Record<string, string>)['content-type'] = 'application/json';

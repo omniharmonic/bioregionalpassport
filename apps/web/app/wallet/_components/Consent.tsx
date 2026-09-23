@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button, Card, Explain, Notice, TierBadge, type Tier } from '@passport/ui-kit';
-import { acceptMembership, vacActions, type AckResult } from '@passport/pod-client';
+import { acceptMembership, messageOf, vacActions, verifyGrant, type AckResult, type PodRow } from '@passport/pod-client';
 import type { VerifiableCredential } from '@passport/credential-core';
 import { useWalletState } from '../_lib/WalletContext';
 import { ErrorNotice, describeAction, formatDate, tierLabel, useAction } from '../_lib/ui';
@@ -13,17 +13,49 @@ import { ErrorNotice, describeAction, formatDate, tierLabel, useAction } from '.
  */
 export function Consent({ grant, onAccepted, onDecline }: { grant: VerifiableCredential; onAccepted?: (r: AckResult) => void; onDecline?: () => void }) {
   const w = useWalletState();
-  const manifest = w.pod!.manifest;
   const [result, setResult] = useState<AckResult | null>(null);
+  // The offer is checked before it is shown: from a pod this passport joined (by the grant's issuer, never the
+  // pod currently on screen), made out to my persona there, signed by that pod, and current.
+  const [target, setTarget] = useState<PodRow | null>(null);
+  const [refusal, setRefusal] = useState<string | null>(null);
+  useEffect(() => {
+    if (!w.wallet) return;
+    let live = true;
+    setTarget(null);
+    setRefusal(null);
+    verifyGrant(w.wallet, grant)
+      .then((pod) => live && setTarget(pod))
+      .catch((e) => live && setRefusal(messageOf(e)));
+    return () => {
+      live = false;
+    };
+  }, [w.wallet, grant]);
   const s = grant.credentialSubject;
 
   const accept = useAction(async () => {
-    const client = await w.clientFor();
+    const client = await w.clientFor(target!.slug);
     const r = await acceptMembership(w.wallet!, client, grant);
     setResult(r);
     await w.reload();
     onAccepted?.(r);
   });
+
+  if (refusal) {
+    return (
+      <Card className="grid gap-3">
+        <Notice kind="error">{refusal}</Notice>
+        {onDecline ? (
+          <div>
+            <Button variant="ghost" onClick={onDecline}>
+              Dismiss
+            </Button>
+          </div>
+        ) : null}
+      </Card>
+    );
+  }
+  if (!target) return <p role="status" className="muted">Checking this membership offer…</p>;
+  const manifest = target.manifest;
 
   if (result) {
     const actions = [...new Set(result.vacs.flatMap(vacActions))];

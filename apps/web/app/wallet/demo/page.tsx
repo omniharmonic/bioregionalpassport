@@ -4,11 +4,28 @@ import { useEffect, useRef, useState } from 'react';
 import { Button, Card, Explain, Notice, PageHeader, TierBadge, type Tier } from '@passport/ui-kit';
 import { Ceremony, PodClient, createWallet, openWallet, vacActions, withSession, type PodEvent, type Wallet } from '@passport/pod-client';
 import type { VerifiableCredential } from '@passport/credential-core';
+import type { BioregionManifest } from '@passport/tenant-config';
 import { useWalletState } from '../_lib/WalletContext';
 import { Did, ErrorNotice, Section, describeAction, formatDate, tierLabel, useAction } from '../_lib/ui';
 
 const DEMO_DB = 'passport-demo-phone';
+const NEIGHBOR_DB = 'passport-demo-neighbor';
+
+/** Pods where the simulated phone may create real (demo) members: `NEXT_PUBLIC_DEMO_PODS`, default tenant-zero. */
+const DEMO_PODS = (process.env['NEXT_PUBLIC_DEMO_PODS'] ?? 'tenant-zero')
+  .split(',')
+  .map((x) => x.trim().toLowerCase())
+  .filter(Boolean);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function makePhone(name: string, pod: { slug: string; manifest: BioregionManifest }): Promise<DemoPhone> {
+  await openWallet({ name }).forget().catch(() => undefined);
+  const wallet = await createWallet({ name });
+  const persona = await wallet.mintPersona(pod.slug);
+  await wallet.addPod(pod.manifest, persona.did);
+  const client = new PodClient({ slug: pod.slug, manifest: pod.manifest, persona, db: wallet.db });
+  return { wallet, client, ceremony: new Ceremony({ wallet, relay: client.relay(), pod: pod.slug }), did: persona.did };
+}
 
 interface DemoPhone {
   wallet: Wallet;
@@ -21,11 +38,15 @@ interface DemoPhone {
  * Single-device demo: "Simulate a second phone". A second wallet (its own IndexedDB database) plays the other
  * person, using the real pod routes (`/api/vta/relay`, `/membership/apply`, `/membership/ack`). The second phone
  * never opens a session, so your own sign-in cookie is untouched. Witnessing still needs a real convener: the demo
- * convener panel appears only when your passport already holds `vwc:issue` for this pod.
+ * convener panel appears only when your passport already holds `vwc:issue` for this pod; then the second phone meets
+ * a simulated neighbor (the pod refuses a convener who is a party to the relationship). Available only on the demo
+ * pods in `NEXT_PUBLIC_DEMO_PODS` (default `tenant-zero`), because the demo creates real members.
  */
 export default function DemoPage() {
   const w = useWalletState();
   const [phone, setPhone] = useState<DemoPhone | null>(null);
+  /** When you are the convener, the second phone meets this simulated neighbor instead (no one witnesses their own relationship). */
+  const [neighbor, setNeighbor] = useState<DemoPhone | null>(null);
   const [log, setLog] = useState<string[]>([]);
   const [met, setMet] = useState(false);
   const [authorities, setAuthorities] = useState<string[]>([]);
@@ -37,8 +58,11 @@ export default function DemoPage() {
   const [admitted, setAdmitted] = useState<{ tier: string; vacs: VerifiableCredential[]; explanation: string[] } | null>(null);
   const phoneRef = useRef<DemoPhone | null>(null);
   phoneRef.current = phone;
+  const neighborRef = useRef<DemoPhone | null>(null);
+  neighborRef.current = neighbor;
 
   const say = (line: string) => setLog((l) => [...l, line]);
+  const canConvene = authorities.includes('vwc:issue');
 
   useEffect(() => {
     if (!w.wallet || !w.slug) return;
@@ -55,13 +79,10 @@ export default function DemoPage() {
 
   const start = useAction(async () => {
     const pod = w.pod!;
-    // Always start from an empty demo passport.
-    await (phoneRef.current?.wallet ?? openWallet({ name: DEMO_DB })).forget().catch(() => undefined);
-    const fresh = await createWallet({ name: DEMO_DB });
-    const persona = await fresh.mintPersona(pod.slug);
-    await fresh.addPod(pod.manifest, persona.did);
-    const client = new PodClient({ slug: pod.slug, manifest: pod.manifest, persona, db: fresh.db });
-    setPhone({ wallet: fresh, client, ceremony: new Ceremony({ wallet: fresh, relay: client.relay(), pod: pod.slug }), did: persona.did });
+    await neighborRef.current?.wallet.forget().catch(() => undefined);
+    const p = await makePhone(DEMO_DB, pod);
+    setPhone(p);
+    setNeighbor(null);
     setLog([`The second phone joined ${pod.manifest.identity.name} as a visitor.`]);
     setMet(false);
     setVwc(null);
@@ -69,26 +90,37 @@ export default function DemoPage() {
     setAdmitted(null);
   });
 
+  /** The second phone's relationship partner: your passport, or (when you will convene) a simulated neighbor. */
+  const partnerDid = () => (neighborRef.current ? neighborRef.current.did : myDid!);
+
   const meet = useAction(async () => {
     const p = phoneRef.current!;
-    const mine = await w.ceremonyFor();
+    let other: Ceremony;
+    if (canConvene) {
+      const n = await makePhone(NEIGHBOR_DB, w.pod!);
+      setNeighbor(n);
+      neighborRef.current = n;
+      other = n.ceremony;
+      say('You will be the convener, and no one witnesses their own relationship, so a simulated neighbor meets the second phone.');
+    } else {
+      other = await w.ceremonyFor();
+    }
     const session = await p.ceremony.host();
-    say('The second phone shows its code; your passport scans it.');
-    const joined = await mine.join(session.inviteJson);
-    say('Your passport signed its half and sent it through the pod relay.');
+    say(canConvene ? 'The second phone shows its code; the neighbor scans it.' : 'The second phone shows its code; your passport scans it.');
+    const joined = await other.join(session.inviteJson);
     let hostDone = false;
     let joinDone = false;
     for (let i = 0; i < 30 && !(hostDone && joinDone); i++) {
       if (!hostDone && (await p.ceremony.pollHost(session))) {
         hostDone = true;
-        say('The second phone checked your half and signed its own back.');
+        say('The second phone checked the other half and signed its own back.');
       }
-      if (!joinDone && (await mine.pollJoin(joined))) joinDone = true;
+      if (!joinDone && (await other.pollJoin(joined))) joinDone = true;
       if (!(hostDone && joinDone)) await sleep(700);
     }
     if (!(hostDone && joinDone)) throw new Error('The relay did not answer in time; try again.');
-    await w.wallet!.updateContact(p.did, { name: 'Second phone (demo)' });
-    say('Both phones now hold both signed halves of the relationship.');
+    if (!canConvene) await w.wallet!.updateContact(p.did, { name: 'Second phone (demo)' });
+    say('Both sides now hold both signed halves of the relationship.');
     setMet(true);
     await w.reload();
   });
@@ -114,7 +146,7 @@ export default function DemoPage() {
   const witness = useAction(async () => {
     const p = phoneRef.current!;
     const ev = events.find((e) => e.id === eventId)!;
-    await p.ceremony.requestWitness(ev, myDid!);
+    await p.ceremony.requestWitness(ev, partnerDid());
     say('The second phone tapped “I’m here” and asked the convener to witness.');
     const client = await w.clientFor();
     const mine = await w.ceremonyFor();
@@ -122,7 +154,7 @@ export default function DemoPage() {
     if (!req) throw new Error('The witness request has not arrived yet; try again in a moment.');
     await withSession(w.wallet!, client, () => mine.witness(client, ev, req), ['vwc:issue']);
     say('You witnessed it as the convener; the pod issued a witness credential.');
-    const got = await p.ceremony.pollWitnessResult(ev, myDid!);
+    const got = await p.ceremony.pollWitnessResult(ev, partnerDid());
     if (!got) throw new Error('The witness credential has not reached the second phone yet; try again.');
     setVwc(got);
     say('The second phone received the witness credential.');
@@ -130,7 +162,7 @@ export default function DemoPage() {
 
   const apply = useAction(async () => {
     const p = phoneRef.current!;
-    const c = await p.wallet.contact(myDid!);
+    const c = await p.wallet.contact(partnerDid());
     const g = await p.client.apply(vwc!, c!.vrcOut!, c!.vrcIn!);
     await p.wallet.storeCredential(g, { pod: p.client.slug });
     setGrant(g);
@@ -148,7 +180,9 @@ export default function DemoPage() {
 
   const reset = useAction(async () => {
     await phoneRef.current?.wallet.forget();
+    await neighborRef.current?.wallet.forget();
     setPhone(null);
+    setNeighbor(null);
     setLog([]);
     setMet(false);
     setVwc(null);
@@ -158,7 +192,14 @@ export default function DemoPage() {
 
   if (!w.pod) return null;
   const manifest = w.pod.manifest;
-  const canConvene = authorities.includes('vwc:issue');
+  if (!DEMO_PODS.includes(w.pod.slug)) {
+    return (
+      <div className="grid gap-6">
+        <PageHeader title="Simulate a second phone" />
+        <Notice kind="info">The simulated second phone is only available on demo pods.</Notice>
+      </div>
+    );
+  }
 
   return (
     <div className="grid gap-8">
@@ -187,11 +228,11 @@ export default function DemoPage() {
         <Section title="2. Meet">
           <ErrorNotice error={meet.error} />
           {met ? (
-            <p className="text-sm">You and the second phone have met.</p>
+            <p className="text-sm">{neighbor ? 'The second phone and a simulated neighbor have met.' : 'You and the second phone have met.'}</p>
           ) : (
             <div>
               <Button onClick={() => void meet.run()} disabled={meet.busy}>
-                {meet.busy ? 'Meeting…' : 'Meet the second phone'}
+                {meet.busy ? 'Meeting…' : canConvene ? 'Let the second phone meet a neighbor' : 'Meet the second phone'}
               </Button>
             </div>
           )}

@@ -32,9 +32,9 @@ export {
   type VouchScope,
   type WitnessRequest,
 } from './ceremony.js';
-export { signIn, withSession, applyForMembership, acceptMembership, refreshTier, optInToIndex, commitmentFor } from './membership.js';
+export { signIn, withSession, applyForMembership, acceptMembership, verifyGrant, refreshTier, optInToIndex, commitmentFor, commitSalt } from './membership.js';
 export { exportBackup, importBackup, createShares, recoverFromShares, recoveryStatus, exportCredentialsJson, BACKUP_FORMAT, SHARE_PREFIX } from './recovery.js';
-export { parsePaymentRequest, buildPayAuthorization, payRequest } from './pay.js';
+export { parsePaymentRequest, checkPaymentRequest, buildPayAuthorization, payRequest } from './pay.js';
 export {
   PodError,
   messageOf,
@@ -48,5 +48,7 @@ export {
   isCurrent,
   vacActions,
   isOnline,
+  defaultResolver,
+  credentialsFor,
   type CredentialKind,
 } from './util.js';

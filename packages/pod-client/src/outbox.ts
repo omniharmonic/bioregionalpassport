@@ -1,5 +1,5 @@
 import type { WalletDb, OutboxRow } from './db.js';
-import { isOnline, PodError } from './util.js';
+import { credentialsFor, isOnline, PodError } from './util.js';
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -50,7 +50,7 @@ export class Outbox {
   ) {}
 
   private async deliver(req: HttpRequest): Promise<{ status: number; body: any }> {
-    const init: RequestInit = { method: req.method, headers: { accept: 'application/json', ...(req.headers ?? {}) }, credentials: 'same-origin' };
+    const init: RequestInit = { method: req.method, headers: { accept: 'application/json', ...(req.headers ?? {}) }, credentials: credentialsFor(req.url) };
     if (req.body !== undefined) {
       init.body = JSON.stringify(req.body);
       (init.headers as Record<string, string>)['content-type'] = 'application/json';

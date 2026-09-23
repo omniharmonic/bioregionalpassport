@@ -1,7 +1,9 @@
-import { digestMultibase, toBase58btc, randomNonce, type VerifiableCredential } from '@passport/credential-core';
+import { digestMultibase, toBase58btc, toBase64url, verifyDocument, type DataIntegrityProof, type DidResolver, type VerifiableCredential } from '@passport/credential-core';
+import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
+import type { PodRow } from './db.js';
 import type { AckResult, CommitItem, PodClient, RefreshResult, SessionInfo } from './client.js';
-import { PodError, utf8 } from './util.js';
+import { defaultResolver, PodError, utf8 } from './util.js';
 import type { Wallet } from './wallet.js';
 
 /**
@@ -30,20 +32,52 @@ export async function withSession<T>(wallet: Wallet, client: PodClient, fn: () =
   }
 }
 
-/** Applies with the witnessed relationship with `contactDid`; stores and returns the grant (not yet accepted). */
+/**
+ * Applies with the witnessed relationship with `contactDid`; stores and returns the grant (not yet accepted).
+ * When the pod refuses the witness credential (`WITNESS_INVALID`), it is dropped and remembered as refused, so the
+ * wallet goes back to waiting for a valid witness result.
+ */
 export async function applyForMembership(wallet: Wallet, client: PodClient, contactDid: string): Promise<VerifiableCredential> {
   const c = await wallet.contact(contactDid);
   if (!c?.vwc || !c.vrcOut || !c.vrcIn) throw new Error('This relationship has not been witnessed yet.');
-  const grant = await client.apply(c.vwc, c.vrcOut, c.vrcIn);
+  let grant: VerifiableCredential;
+  try {
+    grant = await client.apply(c.vwc, c.vrcOut, c.vrcIn);
+  } catch (e) {
+    if (e instanceof PodError && e.code === 'WITNESS_INVALID') {
+      await wallet.updateContact(contactDid, { vwc: undefined, refusedVwcs: [...(c.refusedVwcs ?? []), digestMultibase(c.vwc)] });
+    }
+    throw e;
+  }
   await wallet.storeCredential(grant, { pod: client.slug });
   return grant;
 }
 
 /**
- * Consent: signs the acknowledgement of `grant` (only after the person pressed "I accept"), stores the pair and
- * the VACs, records the tier, then opens a member session.
+ * Checks a membership offer before the consent screen shows it: it must come from a pod this passport has joined
+ * (looked up by the grant's issuer DID), be made out to the persona used there, be signed by that pod, and be
+ * current. Returns that pod; throws one plain sentence otherwise.
  */
-export async function acceptMembership(wallet: Wallet, client: PodClient, grant: VerifiableCredential): Promise<AckResult & { session?: SessionInfo }> {
+export async function verifyGrant(wallet: Wallet, grant: unknown, resolver: DidResolver = defaultResolver()): Promise<PodRow> {
+  const g = grant as VerifiableCredential | undefined;
+  const isGrant = Array.isArray(g?.type) && g!.type.includes('MembershipCredential') && typeof g!.credentialSubject?.['digestMultibase'] !== 'string';
+  if (!g || !isGrant) throw new Error('This is not a membership offer.');
+  const pod = (await wallet.pods()).find((p) => p.did === g.issuer);
+  if (!pod) throw new Error('This membership offer is not from a pod your passport has joined.');
+  if (g.credentialSubject.id !== pod.personaDid) throw new Error(`This membership offer from ${pod.manifest.identity.name} was made out to a different identifier.`);
+  const r = g.proof ? await verifyDocument(g as VerifiableCredential & { proof: DataIntegrityProof }, resolver, { proofPurpose: 'assertionMethod' }).catch(() => ({ ok: false, controller: undefined })) : { ok: false, controller: undefined };
+  if (!r.ok || r.controller !== pod.did) throw new Error(`This membership offer is not signed by ${pod.manifest.identity.name}.`);
+  if (!g.validUntil || Date.parse(g.validUntil) <= wallet.now().getTime()) throw new Error('This membership offer has expired.');
+  return pod;
+}
+
+/**
+ * Consent: signs the acknowledgement of `grant` (only after the person pressed "I accept"), stores the pair and
+ * the VACs, records the tier, then opens a member session. The grant is verified first (`verifyGrant`).
+ */
+export async function acceptMembership(wallet: Wallet, client: PodClient, grant: VerifiableCredential, opts: { resolver?: DidResolver } = {}): Promise<AckResult & { session?: SessionInfo }> {
+  const pod = await verifyGrant(wallet, grant, opts.resolver);
+  if (pod.slug !== client.slug) throw new Error(`This membership offer is from ${pod.manifest.identity.name}, not the pod you are signed in to.`);
   const r = await client.ack(grant);
   await wallet.storeCredential(grant, { pod: client.slug });
   await wallet.storeCredential(r.ackCredential, { pod: client.slug });
@@ -70,6 +104,15 @@ export async function refreshTier(wallet: Wallet, client: PodClient): Promise<Re
   return r;
 }
 
+/**
+ * Commitment salt, derived (not random) so a retry re-posts the SAME commitment and the index reports a duplicate
+ * instead of counting twice: HKDF-SHA256(ikm = my identifier's seed, info = `index-commit:<ref>`), 16 bytes, where
+ * `ref` is the witness credential's digest (relationship) or the vouch's digest.
+ */
+export function commitSalt(seed: Uint8Array, ref: string): string {
+  return toBase64url(hkdf(sha256, seed, undefined, utf8(`index-commit:${ref}`), 16));
+}
+
 /** Salted commitment `H(salt ‖ my did ‖ their did ‖ scope)` (z-base58 sha256). */
 export function commitmentFor(salt: string, me: string, them: string, scope: string): string {
   return toBase58btc(sha256(utf8(`${salt}|${me}|${them}|${scope}`)));
@@ -84,17 +127,21 @@ export function commitmentFor(salt: string, me: string, them: string, scope: str
 export async function optInToIndex(wallet: Wallet, client: PodClient, contactDid: string, what: 'relationship' | 'vouch'): Promise<{ accepted: number; duplicates: number }> {
   const c = await wallet.contact(contactDid);
   if (!c) throw new Error('That neighbor is not in your contacts.');
-  const salt = randomNonce(16);
+  const me = await wallet.keyFor(c.myDid);
+  if (!me) throw new Error('This passport no longer holds the identifier used for that relationship.');
   let item: CommitItem;
   if (what === 'relationship') {
     if (!c.vwc) throw new Error('Only a witnessed relationship can be counted.');
-    item = { commitment: commitmentFor(salt, c.myDid, c.did, 'relationship'), scope: 'relationship', witnessRef: digestMultibase(c.vwc) };
+    const witnessRef = digestMultibase(c.vwc);
+    item = { commitment: commitmentFor(commitSalt(me.privateKey, witnessRef), c.myDid, c.did, 'relationship'), scope: 'relationship', witnessRef };
   } else {
     const scope = c.vecIn?.credentialSubject?.['object']?.value?.scope;
     if (!c.vecIn || (scope !== 'lives-here' && scope !== 'worked-with' && scope !== 'knows')) throw new Error('This neighbor has not vouched for you yet.');
+    const salt = commitSalt(me.privateKey, digestMultibase(c.vecIn));
     item = { commitment: commitmentFor(salt, c.myDid, c.did, scope), scope, evidence: { vec: c.vecIn } };
   }
   const r = await withSession(wallet, client, () => client.commit([item]));
-  await wallet.updateContact(contactDid, { committed: [...(c.committed ?? []), { scope: item.scope, commitment: item.commitment, at: wallet.now().toISOString() }] });
+  const prior = (c.committed ?? []).filter((x) => x.commitment !== item.commitment);
+  await wallet.updateContact(contactDid, { committed: [...prior, { scope: item.scope, commitment: item.commitment, at: wallet.now().toISOString() }] });
   return { accepted: r.accepted, duplicates: r.duplicates };
 }

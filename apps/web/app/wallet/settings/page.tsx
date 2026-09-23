@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Card, Explain, Field, Input, Notice, PageHeader, Textarea } from '@passport/ui-kit';
-import { abbreviateDid, exportCredentialsJson, recoveryStatus, type OutboxRow } from '@passport/pod-client';
+import { abbreviateDid, exportCredentialsJson, openWallet, recoveryStatus, type OutboxRow } from '@passport/pod-client';
 import type { VerifiableCredential } from '@passport/credential-core';
 import { Consent } from '../_components/Consent';
 import { ChoosePod } from '../_components/Onboarding';
@@ -36,6 +36,16 @@ export default function SettingsPage() {
   });
 
   const forget = useAction(async () => {
+    // End the sign-in on this device too, and remove the demo phones' passports.
+    for (const p of w.pods) {
+      try {
+        await (await w.clientFor(p.slug)).signOut();
+        break; // one cookie serves every pod on this origin
+      } catch {
+        // Offline: the session cookie expires on its own within the hour.
+      }
+    }
+    for (const name of ['passport-demo-phone', 'passport-demo-neighbor']) await openWallet({ name }).forget().catch(() => undefined);
     await w.wallet!.forget();
     window.location.assign('/wallet');
   });
@@ -50,10 +60,10 @@ export default function SettingsPage() {
     if (!vc || !Array.isArray(vc.type) || !vc.proof || typeof vc.issuer !== 'string') throw new Error('That is not a signed credential.');
     const pod = w.pods.find((p) => p.did === vc.issuer || p.personaDid === vc.credentialSubject?.id);
     const isGrant = vc.type.includes('MembershipCredential') && typeof vc.credentialSubject?.['digestMultibase'] !== 'string';
-    if (isGrant && pod && vc.credentialSubject?.id === pod.personaDid) {
-      // A membership grant handed over by the pod (e.g. the operator's first-steward bootstrap): it only becomes
-      // membership once the person accepts it with their own signature.
-      if (pod.slug !== w.slug) w.selectPod(pod.slug);
+    if (isGrant) {
+      // A membership grant handed over by a pod (e.g. the operator's first-steward bootstrap): the consent screen
+      // checks it (issuer = a joined pod, made out to my persona, signed) and it only becomes membership once the
+      // person accepts it with their own signature.
       setPendingGrant(vc);
       setPaste('');
       return;
