@@ -72,7 +72,12 @@ async function newPod(): Promise<Pod> {
       ),
     member: (did, tier = 'T1') =>
       withPod(db, slug, async (tx) => {
-        await tx.query('INSERT INTO members (did, tier) VALUES ($1, $2)', [did, tier]);
+        await tx.query('INSERT INTO members (did, tier, vmc_grant_digest, vmc_ack_digest) VALUES ($1, $2, $3, $4)', [
+          did,
+          tier,
+          `zGrant-${did}`,
+          `zAck-${did}`,
+        ]);
       }),
     witness: (digest, eventId, convener) =>
       withPod(db, slug, async (tx) => {
@@ -229,6 +234,37 @@ describe('trust index on PGlite', () => {
     // T0: E1, E2, hop-1 (recorded T2 but no witnessed edges of their own)
     expect(result.counts).toEqual({ T0: 3, T1: 1, T2: 1, T3: 0, T4: 1 });
     expect(result.total).toBe(6);
+  });
+
+  it('a pending applicant (no ack yet) or an expired membership recommends T0', async () => {
+    const pod = await newPod();
+    const P = 'did:key:zPending';
+    const X = 'did:key:zExpired';
+    await pod.run(async (ctx) => {
+      await ctx.db.query("INSERT INTO members (did, tier, vmc_grant_digest) VALUES ($1, 'T0', 'zGrant')", [P]);
+      await ctx.db.query(
+        "INSERT INTO members (did, tier, vmc_grant_digest, vmc_ack_digest, valid_until) VALUES ($1, 'T1', 'zG', 'zA', $2)",
+        [X, new Date(NOW.getTime() - 86_400_000)],
+      );
+    });
+    await pod.witness('wp', 'event-1', 'did:key:zC1');
+    await pod.witness('wq', 'event-1', 'did:key:zC1');
+    await pod.post(P, [{ commitment: 'pending-1-aaaaaaa', scope: 'relationship', witnessRef: 'wp' }]);
+    await pod.post(X, [{ commitment: 'expired-1-aaaaaaa', scope: 'relationship', witnessRef: 'wq' }]);
+
+    const rec = await pod.run((ctx) => recommendTier(ctx, P));
+    expect(rec.tier).toBe('T0');
+    expect(rec.metrics).toMatchObject({ vmcPairComplete: false, membership: 'pending', witnessedEdges: 1 });
+    expect(rec.explanation).toContain('Your membership is not complete until you acknowledge the grant.');
+    expect(rec.next).toMatchObject({ tier: 'T1', missing: ['vmcPairComplete'] });
+
+    const exp = await pod.run((ctx) => recommendTier(ctx, X));
+    expect(exp.tier).toBe('T0');
+    expect(exp.metrics.membership).toBe('expired');
+
+    // once acknowledged, the same applicant is T1
+    await pod.run((ctx) => ctx.db.query("UPDATE members SET vmc_ack_digest = 'zAck', tier = 'T1' WHERE did = $1", [P]));
+    expect((await pod.run((ctx) => recommendTier(ctx, P))).tier).toBe('T1');
   });
 
   it('the pod migration creates the index tables (no runtime DDL)', async () => {

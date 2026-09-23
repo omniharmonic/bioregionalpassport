@@ -8,6 +8,7 @@ export type {
   IndexContext,
   MemberAggregate,
   MemberMetrics,
+  MembershipStatus,
   RequirementResult,
   Scorer,
   TierRecommendation,
@@ -25,7 +26,7 @@ export {
   recommend,
   isEndorsementScope,
 } from './scorer.js';
-export { parseTierRequirement, evaluateRequirement, isGovernanceMetric } from './requirements.js';
+export { parseTierRequirement, evaluateRequirement, isGovernanceMetric, membershipSentence } from './requirements.js';
 export type { ParsedRequirement, ComparisonOp } from './requirements.js';
 export { CommitBodySchema, COMMIT_SCOPES, MAX_WITNESS_CLAIMANTS, commitEdges, markWeighted } from './commit.js';
 export type { CommitBody, CommitDeps, CommitResult, CommitItemResult } from './commit.js';

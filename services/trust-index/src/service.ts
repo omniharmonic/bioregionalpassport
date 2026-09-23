@@ -18,6 +18,7 @@ function emptyAggregate(did: string): MemberAggregate {
   return {
     did,
     vmcPairComplete: false,
+    membership: 'none',
     recordedTier: null,
     witnessedEdges: 0,
     distinctEvents: 0,

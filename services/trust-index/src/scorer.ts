@@ -1,6 +1,6 @@
 import type { TrustPolicy } from '@passport/tenant-config';
 import { ENDORSEMENT_SCOPES, TIERS, type Tier } from '@passport/vocab';
-import { evaluateRequirement } from './requirements.js';
+import { evaluateRequirement, membershipSentence } from './requirements.js';
 import type {
   Endorsement,
   MemberAggregate,
@@ -91,6 +91,7 @@ export function metricsFor(
   const seedHops = seedSetEmpty ? 0 : distances.get(member.did) ?? null;
   return {
     vmcPairComplete: member.vmcPairComplete,
+    membership: member.membership ?? (member.vmcPairComplete ? 'complete' : 'none'),
     recordedTier: member.recordedTier,
     witnessedEdges: member.witnessedEdges,
     distinctEvents: member.distinctEvents,
@@ -150,7 +151,7 @@ export function recommend(member: MemberAggregate, metrics: MemberMetrics, polic
         tier: nextTier,
         requirement: 'vmcPairComplete',
         met: false,
-        sentence: 'Your membership pair is not complete — finish joining the pod with a convener at an attestation event.',
+        sentence: membershipSentence(metrics.membership),
       });
     }
     rec.next = { tier: nextTier, missing: failing.map((r) => r.requirement), hints: failing.map((r) => r.sentence) };

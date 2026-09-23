@@ -20,8 +20,14 @@ export interface Endorsement {
  */
 export interface MemberAggregate {
   did: string;
-  /** A `members` row exists (VMC grant + ack complete). */
+  /**
+   * The VMC pair is complete: a `members` row with `vmc_ack_digest` set and
+   * `valid_until` (when present) in the future. A pending applicant row (tier T0,
+   * no ack yet) is not complete.
+   */
   vmcPairComplete: boolean;
+  /** Why the pair is or is not complete; derived from `vmcPairComplete` when absent. */
+  membership?: MembershipStatus;
   /** `members.tier` as recorded by the PEP or a steward/operator; `null` for non-members. */
   recordedTier: Tier | null;
   /** Distinct witness references across the member's witnessed postings. */
@@ -41,8 +47,12 @@ export interface TrustGraph {
   links: Map<string, Set<string>>;
 }
 
+/** `none` = no members row; `pending` = grant issued, not yet acknowledged; `expired` = past `valid_until`. */
+export type MembershipStatus = 'none' | 'pending' | 'expired' | 'complete';
+
 export interface MemberMetrics {
   vmcPairComplete: boolean;
+  membership: MembershipStatus;
   recordedTier: Tier | null;
   witnessedEdges: number;
   distinctEvents: number;

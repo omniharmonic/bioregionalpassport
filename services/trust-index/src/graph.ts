@@ -40,7 +40,9 @@ export function toDate(value: Date | string): Date {
 /** Builds per-member aggregates + adjacency for the whole pod (BFS needs the whole graph). */
 export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph; postings: PostingRow[] }> {
   const postings = await loadPostings(ctx);
-  const memberRows = await ctx.db.query<{ did: string; tier: string }>('SELECT did, tier FROM members');
+  const memberRows = await ctx.db.query<{ did: string; tier: string; vmc_ack_digest: string | null; valid_until: Date | string | null }>(
+    'SELECT did, tier, vmc_ack_digest, valid_until FROM members',
+  );
   const linkRows = await ctx.db.query<{ from_did: string; to_did: string }>('SELECT from_did, to_did FROM index_links');
   const now = ctx.now().getTime();
 
@@ -52,6 +54,7 @@ export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph;
       m = {
         did,
         vmcPairComplete: false,
+        membership: 'none',
         recordedTier: null,
         witnessedEdges: 0,
         distinctEvents: 0,
@@ -66,7 +69,11 @@ export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph;
 
   for (const row of memberRows) {
     const m = ensure(row.did);
-    m.vmcPairComplete = true;
+    // A pending applicant row (VTA inserts it at T0 before the ack) is not a complete pair.
+    const acked = row.vmc_ack_digest !== null && row.vmc_ack_digest !== '';
+    const expired = row.valid_until !== null && toDate(row.valid_until).getTime() <= now;
+    m.membership = !acked ? 'pending' : expired ? 'expired' : 'complete';
+    m.vmcPairComplete = m.membership === 'complete';
     m.recordedTier = asTier(row.tier);
   }
 

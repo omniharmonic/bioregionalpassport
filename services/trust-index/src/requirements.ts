@@ -96,7 +96,7 @@ export function evaluateRequirement(raw: string, input: EvaluateInput): { met: b
     if (req.metric === 'vmcPairComplete') {
       return m.vmcPairComplete
         ? { met: true, sentence: 'Your membership pair is complete.' }
-        : { met: false, sentence: 'Your membership pair is not complete — finish joining the pod with a convener at an attestation event.' };
+        : { met: false, sentence: membershipSentence(m.membership) };
     }
     return { met: false, sentence: `The policy flag "${req.metric}" is not something the index knows how to check, so it cannot be met.` };
   }
@@ -156,6 +156,20 @@ export function evaluateRequirement(raw: string, input: EvaluateInput): { met: b
       };
     default:
       return { met: false, sentence: `The policy metric "${metric}" is not something the index knows how to check, so it cannot be met.` };
+  }
+}
+
+/** Plain sentence for an incomplete membership pair. */
+export function membershipSentence(status: MemberMetrics['membership']): string {
+  switch (status) {
+    case 'pending':
+      return 'Your membership is not complete until you acknowledge the grant.';
+    case 'expired':
+      return 'Your membership has expired — renew it with the pod to regain your tier.';
+    case 'complete':
+      return 'Your membership pair is complete.';
+    default:
+      return 'Your membership pair is not complete — finish joining the pod with a convener at an attestation event.';
   }
 }
 
