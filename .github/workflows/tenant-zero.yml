@@ -1,0 +1,50 @@
+name: Tenant zero
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # 06:17 UTC, daily. An off-the-hour minute avoids the top-of-hour GitHub Actions crowd.
+    - cron: '17 6 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: tenant-zero-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provision-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Enable corepack (pnpm 10)
+        run: corepack enable
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # scripts/tenant-zero.mjs imports each package's dist/, not the @passport/* specifier, so it
+      # needs the workspace built first.
+      - name: Build workspace
+        run: pnpm -r build
+
+      # No secrets required: this runs entirely against an in-memory PGlite database with a
+      # throwaway master key generated inside the script.
+      - name: Provision and verify tenant zero
+        run: node scripts/tenant-zero.mjs
+
+      - name: Upload tenant-zero report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tenant-zero-report
+          path: tenant-zero-report.json
+          if-no-files-found: warn
