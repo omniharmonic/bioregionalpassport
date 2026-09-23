@@ -407,6 +407,46 @@ importers:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.15))
 
+  services/round:
+    dependencies:
+      '@noble/hashes':
+        specifier: ^2.4.0
+        version: 2.4.0
+      '@passport/credential-core':
+        specifier: workspace:*
+        version: link:../../packages/credential-core
+      '@passport/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@passport/lexicons':
+        specifier: workspace:*
+        version: link:../../packages/lexicons
+      '@passport/service-kit':
+        specifier: workspace:*
+        version: link:../../packages/service-kit
+      '@passport/tenant-config':
+        specifier: workspace:*
+        version: link:../../packages/tenant-config
+      '@passport/verifier-sdk':
+        specifier: workspace:*
+        version: link:../../packages/verifier-sdk
+      '@passport/vocab':
+        specifier: workspace:*
+        version: link:../../packages/vocab
+      canonicalize:
+        specifier: ^5.1.0
+        version: 5.1.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.4
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^5.0.1
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.15))
+
   services/trust-index:
     dependencies:
       '@passport/credential-core':
