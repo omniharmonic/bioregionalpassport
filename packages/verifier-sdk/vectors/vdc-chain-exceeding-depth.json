@@ -1,0 +1,331 @@
+{
+  "name": "vdc-chain-exceeding-depth",
+  "description": "The garden group delegated round:vote to a steward with maxDepth 0, who re-delegated it to the voter.",
+  "now": "2026-10-01T00:00:00Z",
+  "presentation": {
+    "@context": [
+      "https://www.w3.org/ns/credentials/v2",
+      "https://firstperson.network/credentials/dtg/v1",
+      "https://bioregion.org/credentials/v1"
+    ],
+    "type": [
+      "VerifiablePresentation"
+    ],
+    "holder": "did:key:z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX",
+    "verifiableCredential": [
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1",
+          "https://bioregion.org/credentials/v1"
+        ],
+        "type": [
+          "VerifiableCredential",
+          "MembershipCredential"
+        ],
+        "issuer": "did:web:bioregionalpassport.org:dids:boulder",
+        "validFrom": "2026-09-20T00:00:00Z",
+        "credentialSubject": {
+          "id": "did:key:z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX",
+          "bioregion": "boulder",
+          "placeIds": [
+            "huc12:101900050101"
+          ],
+          "nonce": "bm9uY2Utbm9uY2Utbm9uY2U",
+          "governance": "https://bioregionalpassport.org/p/boulder/governance",
+          "bioregionScope": "public"
+        },
+        "validUntil": "2026-12-15T00:00:00Z",
+        "proof": {
+          "type": "DataIntegrityProof",
+          "cryptosuite": "eddsa-jcs-2022",
+          "created": "2026-09-20T00:00:00Z",
+          "verificationMethod": "did:web:bioregionalpassport.org:dids:boulder#key-1",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z2Tx1m61U3JJbQLCS7uQV35QGQYAaesNLhJndjRQrgF8Y8iwX2FVBQAEaGqj9fAFEyNSHLn1PUxGWsyYFB4gQiHNN"
+        }
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1",
+          "https://bioregion.org/credentials/v1"
+        ],
+        "type": [
+          "VerifiableCredential",
+          "MembershipCredential"
+        ],
+        "issuer": "did:key:z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX",
+        "validFrom": "2026-09-20T00:00:00Z",
+        "credentialSubject": {
+          "id": "did:web:bioregionalpassport.org:dids:boulder",
+          "digestMultibase": "zQmeXyddaqDo8fudunJk5JipoLxudC5DHrpHHL6baXCxrC5",
+          "bioregionScope": "directed"
+        },
+        "validUntil": "2026-12-15T00:00:00Z",
+        "proof": {
+          "type": "DataIntegrityProof",
+          "cryptosuite": "eddsa-jcs-2022",
+          "created": "2026-09-20T00:00:00Z",
+          "verificationMethod": "did:key:z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX#z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z5pUN4rB5yY1qKo1ReyYRe1n8ZffoovPZR4a7XaC3uJWbzvMJ2qZk6y5Q9ezwiV8CGLJHStT1orhRQojEQote5WKF"
+        }
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1",
+          "https://bioregion.org/credentials/v1"
+        ],
+        "type": [
+          "VerifiableCredential",
+          "DelegationCredential"
+        ],
+        "issuer": "did:web:bioregionalpassport.org:dids:garden-collective",
+        "validFrom": "2026-09-20T00:00:00Z",
+        "credentialSubject": {
+          "id": "did:key:z6MkfDSNRs2i9S6LZ5vd4RbpZ6754H7R3btDqRTeHhamqvuJ",
+          "delegation": {
+            "scope": [
+              "round:vote"
+            ],
+            "maxDepth": 0
+          },
+          "bioregionScope": "public"
+        },
+        "validUntil": "2026-12-15T00:00:00Z",
+        "proof": {
+          "type": "DataIntegrityProof",
+          "cryptosuite": "eddsa-jcs-2022",
+          "created": "2026-09-20T00:00:00Z",
+          "verificationMethod": "did:web:bioregionalpassport.org:dids:garden-collective#key-1",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z3w3SZDU9CeUApDqFyqP7RvKyki6efre9DzGsCbad7uTusuP88G1wjzqcm613ucbLS7zx7cS9EcoWtWDGFcdExUaR"
+        }
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1",
+          "https://bioregion.org/credentials/v1"
+        ],
+        "type": [
+          "VerifiableCredential",
+          "DelegationCredential"
+        ],
+        "issuer": "did:key:z6MkfDSNRs2i9S6LZ5vd4RbpZ6754H7R3btDqRTeHhamqvuJ",
+        "validFrom": "2026-09-20T00:00:00Z",
+        "credentialSubject": {
+          "id": "did:web:bioregionalpassport.org:dids:garden-collective",
+          "delegation": {
+            "scope": [
+              "round:vote"
+            ],
+            "accepts": "zQmcN14uRygtRPnyFpsszn8sdEiUrTv3wqBUNUxfRvZMRzW"
+          },
+          "bioregionScope": "directed"
+        },
+        "validUntil": "2026-12-15T00:00:00Z",
+        "proof": {
+          "type": "DataIntegrityProof",
+          "cryptosuite": "eddsa-jcs-2022",
+          "created": "2026-09-20T00:00:00Z",
+          "verificationMethod": "did:key:z6MkfDSNRs2i9S6LZ5vd4RbpZ6754H7R3btDqRTeHhamqvuJ#z6MkfDSNRs2i9S6LZ5vd4RbpZ6754H7R3btDqRTeHhamqvuJ",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z3ghjrrF5yQRSzvBGWw7yhD4acuPXt2gW3dQFmQBKghnCkJxF5NqF2BjDbLw5GS1mbXiPvBTbrseE2cJ8fgaavXKA"
+        }
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1",
+          "https://bioregion.org/credentials/v1"
+        ],
+        "type": [
+          "VerifiableCredential",
+          "DelegationCredential"
+        ],
+        "issuer": "did:key:z6MkfDSNRs2i9S6LZ5vd4RbpZ6754H7R3btDqRTeHhamqvuJ",
+        "validFrom": "2026-09-20T00:00:00Z",
+        "credentialSubject": {
+          "id": "did:key:z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX",
+          "delegation": {
+            "scope": [
+              "round:vote"
+            ],
+            "maxDepth": 0
+          },
+          "bioregionScope": "public"
+        },
+        "validUntil": "2026-12-15T00:00:00Z",
+        "proof": {
+          "type": "DataIntegrityProof",
+          "cryptosuite": "eddsa-jcs-2022",
+          "created": "2026-09-20T00:00:00Z",
+          "verificationMethod": "did:key:z6MkfDSNRs2i9S6LZ5vd4RbpZ6754H7R3btDqRTeHhamqvuJ#z6MkfDSNRs2i9S6LZ5vd4RbpZ6754H7R3btDqRTeHhamqvuJ",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "zKu9ghcA4EQNY87LZWEVEh537zd2zcB2KNMVuFYyiwXAYbfAGsYSn7mT9ehabFXzC3oRqpRBZPpnqGNbt1ffgtEu"
+        }
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1",
+          "https://bioregion.org/credentials/v1"
+        ],
+        "type": [
+          "VerifiableCredential",
+          "DelegationCredential"
+        ],
+        "issuer": "did:key:z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX",
+        "validFrom": "2026-09-20T00:00:00Z",
+        "credentialSubject": {
+          "id": "did:key:z6MkfDSNRs2i9S6LZ5vd4RbpZ6754H7R3btDqRTeHhamqvuJ",
+          "delegation": {
+            "scope": [
+              "round:vote"
+            ],
+            "accepts": "zQmQxT3G2HTrpkXn3SEmA6jupYudYF53wkATkix55JKPRtu"
+          },
+          "bioregionScope": "directed"
+        },
+        "validUntil": "2026-12-15T00:00:00Z",
+        "proof": {
+          "type": "DataIntegrityProof",
+          "cryptosuite": "eddsa-jcs-2022",
+          "created": "2026-09-20T00:00:00Z",
+          "verificationMethod": "did:key:z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX#z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z2e15QCjcjX3DdzWqF4oV43hZPbg7sL6uQD1NLNze1UTgbh6jwQfWDJ2g9EwabXKtQmQ2PR3AttgJRj1CSTCMnqEv"
+        }
+      },
+      {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2",
+          "https://firstperson.network/credentials/dtg/v1",
+          "https://bioregion.org/credentials/v1"
+        ],
+        "type": [
+          "VerifiableCredential",
+          "AuthorityCredential"
+        ],
+        "issuer": "did:web:bioregionalpassport.org:dids:boulder",
+        "validFrom": "2026-09-20T00:00:00Z",
+        "credentialSubject": {
+          "id": "did:web:bioregionalpassport.org:dids:garden-collective",
+          "authority": {
+            "scope": "did:web:bioregionalpassport.org:dids:boulder",
+            "actions": [
+              "round:vote"
+            ]
+          },
+          "policyVersion": 1,
+          "bioregionScope": "public"
+        },
+        "validUntil": "2026-12-15T00:00:00Z",
+        "proof": {
+          "type": "DataIntegrityProof",
+          "cryptosuite": "eddsa-jcs-2022",
+          "created": "2026-09-20T00:00:00Z",
+          "verificationMethod": "did:web:bioregionalpassport.org:dids:boulder#key-1",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z3p6gKWwiNWwoHBuauV9sCM27nLbs2VFH6sZogMEKddpsebdZJzkx4zFd9tiXfweTEwqmg9tEtrKUu5fY9UhFMWFA"
+        }
+      }
+    ],
+    "proof": {
+      "type": "DataIntegrityProof",
+      "cryptosuite": "eddsa-jcs-2022",
+      "created": "2026-10-01T00:00:00Z",
+      "verificationMethod": "did:key:z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX#z6MkmNL6xksdEJENGk9Z1qqGsY5njKQdjU1UhnUEUvWyQUVX",
+      "proofPurpose": "authentication",
+      "challenge": "conformance-challenge-0001",
+      "domain": "bioregionalpassport.org",
+      "proofValue": "z49KKP6AbRtLo2a8MeoPCvwG379u8CRyZ7c3rVgqKRcDEefsyvHNX7CkmhPvzFspL6sz7kogxzJbYghtmYhPfLY5i"
+    }
+  },
+  "policy": {
+    "acceptedPods": [
+      "did:web:bioregionalpassport.org:dids:boulder"
+    ],
+    "requireMembership": true,
+    "requireAuthority": [
+      "round:vote"
+    ],
+    "maxClockSkewSec": 300,
+    "statusCheck": "ifPresent",
+    "challenge": "conformance-challenge-0001",
+    "domain": "bioregionalpassport.org",
+    "allowDelegation": true
+  },
+  "staticDids": {
+    "did:web:bioregionalpassport.org:dids:boulder": {
+      "@context": [
+        "https://www.w3.org/ns/did/v1",
+        "https://w3id.org/security/multikey/v1"
+      ],
+      "id": "did:web:bioregionalpassport.org:dids:boulder",
+      "verificationMethod": [
+        {
+          "id": "did:web:bioregionalpassport.org:dids:boulder#key-1",
+          "type": "Multikey",
+          "controller": "did:web:bioregionalpassport.org:dids:boulder",
+          "publicKeyMultibase": "z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX"
+        }
+      ],
+      "assertionMethod": [
+        "did:web:bioregionalpassport.org:dids:boulder#key-1"
+      ],
+      "authentication": [
+        "did:web:bioregionalpassport.org:dids:boulder#key-1"
+      ]
+    },
+    "did:web:bioregionalpassport.org:dids:tenant-zero": {
+      "@context": [
+        "https://www.w3.org/ns/did/v1",
+        "https://w3id.org/security/multikey/v1"
+      ],
+      "id": "did:web:bioregionalpassport.org:dids:tenant-zero",
+      "verificationMethod": [
+        {
+          "id": "did:web:bioregionalpassport.org:dids:tenant-zero#key-1",
+          "type": "Multikey",
+          "controller": "did:web:bioregionalpassport.org:dids:tenant-zero",
+          "publicKeyMultibase": "z6Mko9hTggMwjSTEaJaPUfE6tqcy2xvU6BnNq3e3o8qVBiyH"
+        }
+      ],
+      "assertionMethod": [
+        "did:web:bioregionalpassport.org:dids:tenant-zero#key-1"
+      ],
+      "authentication": [
+        "did:web:bioregionalpassport.org:dids:tenant-zero#key-1"
+      ]
+    },
+    "did:web:bioregionalpassport.org:dids:garden-collective": {
+      "@context": [
+        "https://www.w3.org/ns/did/v1",
+        "https://w3id.org/security/multikey/v1"
+      ],
+      "id": "did:web:bioregionalpassport.org:dids:garden-collective",
+      "verificationMethod": [
+        {
+          "id": "did:web:bioregionalpassport.org:dids:garden-collective#key-1",
+          "type": "Multikey",
+          "controller": "did:web:bioregionalpassport.org:dids:garden-collective",
+          "publicKeyMultibase": "z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2"
+        }
+      ],
+      "assertionMethod": [
+        "did:web:bioregionalpassport.org:dids:garden-collective#key-1"
+      ],
+      "authentication": [
+        "did:web:bioregionalpassport.org:dids:garden-collective#key-1"
+      ]
+    }
+  },
+  "expected": {
+    "ok": false,
+    "errorCode": "CHAIN_TOO_DEEP"
+  }
+}
