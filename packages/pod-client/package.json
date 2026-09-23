@@ -1,0 +1,41 @@
+{
+  "name": "@passport/pod-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.4.0",
+    "@passport/credential-core": "workspace:*",
+    "@passport/lexicons": "workspace:*",
+    "@passport/tenant-config": "workspace:*",
+    "@passport/vocab": "workspace:*",
+    "dexie": "^4.4.6"
+  },
+  "devDependencies": {
+    "@passport/db": "workspace:*",
+    "@passport/pod-vta": "workspace:*",
+    "@passport/service-kit": "workspace:*",
+    "@passport/trust-index": "workspace:*",
+    "@passport/verifier-sdk": "workspace:*",
+    "@types/node": "^22.10.0",
+    "fake-indexeddb": "^6.2.5",
+    "typescript": "^5.7.0",
+    "vitest": "^5.0.1"
+  }
+}

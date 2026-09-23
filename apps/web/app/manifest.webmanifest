@@ -1,0 +1,16 @@
+{
+  "name": "Bioregional Passport",
+  "short_name": "Passport",
+  "description": "A passport for the place you live: credentials your neighbors vouch for, held on your own device.",
+  "start_url": "/wallet",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fbf8f2",
+  "theme_color": "#1f5f4a",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ],
+  "protocol_handlers": [{ "protocol": "web+passport", "url": "/wallet/join?to=%s" }],
+  "categories": ["lifestyle", "social"]
+}
