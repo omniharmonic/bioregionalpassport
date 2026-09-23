@@ -19,7 +19,10 @@ async function listVtaEvents(slug: string): Promise<VtaEventRow[] | null> {
       tx.query<VtaEventRow>(
         `select id, title, starts_at, ends_at, place_id, conveners, attestation
            from events
-          where ends_at is null or ends_at > now() - interval '1 day'
+          where (ends_at is null or ends_at > now() - interval '1 day')
+            -- Ad-hoc peer-witnessing meetings (kind = 'meeting', pod migration 0011) are not public gatherings.
+            -- Read through to_jsonb so pods that have not applied 0011 yet (no kind column) still list events.
+            and coalesce(to_jsonb(events) ->> 'kind', 'event') = 'event'
           order by starts_at asc nulls last
           limit 100`,
       ),
