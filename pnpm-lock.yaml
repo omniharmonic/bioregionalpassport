@@ -19,7 +19,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^5.0.1
-        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4))
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
 
   packages/credential-core:
     dependencies:
@@ -44,7 +44,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^5.0.1
-        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4))
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
 
   packages/db:
     dependencies:
@@ -63,7 +63,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^5.0.1
-        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4))
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
 
   packages/lexicons:
     dependencies:
@@ -82,7 +82,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^5.0.1
-        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4))
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
 
   packages/tenant-config:
     dependencies:
@@ -104,7 +104,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^5.0.1
-        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4))
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
 
   packages/ui-kit:
     dependencies:
@@ -144,7 +144,35 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^5.0.1
-        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4))
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
+
+  packages/verifier-sdk:
+    dependencies:
+      '@noble/hashes':
+        specifier: ^2.4.0
+        version: 2.4.0
+      '@passport/credential-core':
+        specifier: workspace:*
+        version: link:../credential-core
+      '@passport/vocab':
+        specifier: workspace:*
+        version: link:../vocab
+      '@scure/base':
+        specifier: ^2.4.0
+        version: 2.4.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.4
+      tsx:
+        specifier: ^4.20.0
+        version: 4.23.15
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^5.0.1
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
 
   packages/vocab:
     devDependencies:
@@ -156,7 +184,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^5.0.1
-        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4))
+        version: 5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
 
 packages:
 
@@ -1053,6 +1081,11 @@ packages:
     resolution: {integrity: sha512-hdF5ZgjTqgAntKkklYw0R03MG2x/bSzTtkxmIRw/sTNV8YXsCJ1tfLAX23lhxhHJlEf3CRCOCGGWw3vI3GaSPw==}
     engines: {node: '>=18'}
 
+  tsx@4.23.15:
+    resolution: {integrity: sha512-Yiex1Ovn8z2xPpOWckIiysV1SSyRMY9BkLF++q0yKiDxCqRhosKfMg3janKkiLBwZ5c/YryloKwGZcrEmtwxKw==}
+    engines: {node: '>=18.0.0'}
+    hasBin: true
+
   turbo@2.11.3:
     resolution: {integrity: sha512-Pfg2dWNOUPwJYbR+eYAcjoBbo4Kmoc8uQb80hzKrBgNEQtxvwf2ucXG7C28MyLVhV/zJSKvChrR+2CP/BONpoA==}
     hasBin: true
@@ -1505,14 +1538,14 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
-  '@vitest/mocker@5.0.1(vite@7.3.6(@types/node@22.20.4))':
+  '@vitest/mocker@5.0.1(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       '@vitest/spy': 5.0.1
       estree-walker: 3.0.3
       magic-string: 1.4.1
     optionalDependencies:
-      vite: 7.3.6(@types/node@22.20.4)
+      vite: 7.3.6(@types/node@22.20.4)(tsx@4.23.15)
 
   '@vitest/spy@5.0.1': {}
 
@@ -1954,6 +1987,12 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
+  tsx@4.23.15:
+    dependencies:
+      esbuild: 0.28.2
+    optionalDependencies:
+      fsevents: 2.3.3
+
   turbo@2.11.3:
     optionalDependencies:
       '@turbo/darwin-64': 2.11.3
@@ -1967,7 +2006,7 @@ snapshots:
 
   undici-types@6.21.0: {}
 
-  vite@7.3.6(@types/node@22.20.4):
+  vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15):
     dependencies:
       esbuild: 0.28.2
       fdir: 6.5.0(picomatch@4.0.7)
@@ -1978,11 +2017,12 @@ snapshots:
     optionalDependencies:
       '@types/node': 22.20.4
       fsevents: 2.3.3
+      tsx: 4.23.15
 
-  vitest@5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)):
+  vitest@5.0.1(@types/node@22.20.4)(jsdom@25.0.1)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15)):
     dependencies:
       '@types/chai': 5.2.3
-      '@vitest/mocker': 5.0.1(vite@7.3.6(@types/node@22.20.4))
+      '@vitest/mocker': 5.0.1(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
       chai: 6.2.2
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
@@ -1993,7 +2033,7 @@ snapshots:
       tinybench: 6.1.4
       tinyexec: 1.3.0
       tinyglobby: 0.2.17
-      vite: 7.3.6(@types/node@22.20.4)
+      vite: 7.3.6(@types/node@22.20.4)(tsx@4.23.15)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 22.20.4
