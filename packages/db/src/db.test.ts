@@ -1,3 +1,4 @@
+import { readdir } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { createTestDb, createTestPod } from './adapters/pglite.js';
 import { migratePlatform, migratePod, pendingMigrations, sqlFiles } from './migrate.js';
@@ -5,7 +6,17 @@ import { podSchema } from './podSchema.js';
 import { withPod, withPlatform } from './withPod.js';
 import { listPods } from './listPods.js';
 
-const POD_TABLES = [
+async function sqlFilesOnDisk(dir: URL): Promise<string[]> {
+  const entries = await readdir(dir);
+  return entries.filter((f) => f.endsWith('.sql')).sort();
+}
+
+// The core pod tables required by the MVP plan §4.3. Other services may add
+// further tables in later-numbered migrations (e.g. trust-index side
+// tables), so this is asserted as a minimum subset, not an exact table
+// list — see CORE_PLATFORM_TABLES below for the same reasoning on the
+// platform schema.
+const CORE_POD_TABLES = [
   'members',
   'edge_commitments',
   'witness_refs',
@@ -28,6 +39,8 @@ const POD_TABLES = [
   'offers',
 ];
 
+const CORE_PLATFORM_TABLES = ['pod_keys', 'pods', 'registry_entries', 'relay_messages', 'tenant_zero_runs'];
+
 describe('podSchema', () => {
   it('maps a slug to its schema name', () => {
     expect(podSchema('boulder')).toBe('pod_boulder');
@@ -40,10 +53,18 @@ describe('podSchema', () => {
 });
 
 describe('sqlFiles', () => {
-  it('lists the bundled migration files', async () => {
+  it('lists exactly the migration files present on disk', async () => {
+    const [platformDisk, podDisk] = await Promise.all([
+      sqlFilesOnDisk(new URL('../migrations/platform/', import.meta.url)),
+      sqlFilesOnDisk(new URL('../migrations/pod/', import.meta.url)),
+    ]);
     const files = await sqlFiles();
-    expect(files.platform).toEqual(['0001_init.sql']);
-    expect(files.pod).toEqual(['0001_init.sql']);
+    expect(files.platform).toEqual(platformDisk);
+    expect(files.pod).toEqual(podDisk);
+    // this task's own migration must always be present, whatever else has
+    // been added since
+    expect(files.platform).toContain('0001_init.sql');
+    expect(files.pod).toContain('0001_init.sql');
   });
 });
 
@@ -60,21 +81,32 @@ describe('migratePlatform', () => {
     await db.close();
   });
 
-  it('creates the platform tables', async () => {
+  it('creates at least the core platform tables', async () => {
     const db = await createTestDb();
     const rows = await db.query<{ table_name: string }>(
       "select table_name from information_schema.tables where table_schema = 'platform' and table_name != '_migrations' order by table_name",
     );
-    const names = rows.map((r) => r.table_name).sort();
-    expect(names).toEqual(
-      ['pod_keys', 'pods', 'registry_entries', 'relay_messages', 'tenant_zero_runs'].sort(),
-    );
+    const names = rows.map((r) => r.table_name);
+    for (const table of CORE_PLATFORM_TABLES) {
+      expect(names, `expected platform table '${table}'`).toContain(table);
+    }
+    await db.close();
+  });
+
+  it('records every migration file on disk as applied', async () => {
+    const db = await createTestDb();
+    const diskFiles = await sqlFilesOnDisk(new URL('../migrations/platform/', import.meta.url));
+    const applied = await db.query<{ name: string }>('select name from platform._migrations');
+    const appliedNames = applied.map((r) => r.name);
+    for (const file of diskFiles) {
+      expect(appliedNames, `expected '${file}' to be recorded as applied`).toContain(file);
+    }
     await db.close();
   });
 });
 
 describe('migratePod', () => {
-  it('creates isolated schemas with all pod tables for two slugs', async () => {
+  it('creates isolated schemas with at least the core pod tables for two slugs', async () => {
     const db = await createTestDb();
     await migratePod(db, 'boulder');
     await migratePod(db, 'tenant-zero');
@@ -87,19 +119,36 @@ describe('migratePod', () => {
         `select table_name from information_schema.tables where table_schema = $1 and table_name != '_migrations' order by table_name`,
         [schema],
       );
-      const names = rows.map((r) => r.table_name).sort();
-      expect(names, `tables for ${slug}`).toEqual([...POD_TABLES].sort());
+      const names = rows.map((r) => r.table_name);
+      for (const table of CORE_POD_TABLES) {
+        expect(names, `expected pod table '${table}' for ${slug}`).toContain(table);
+      }
     }
 
     await db.close();
   });
 
-  it('is idempotent per schema', async () => {
+  it('records every migration file on disk as applied, for a fresh pod', async () => {
     const db = await createTestDb();
     await migratePod(db, 'boulder');
+    const diskFiles = await sqlFilesOnDisk(new URL('../migrations/pod/', import.meta.url));
+    const applied = await db.query<{ name: string }>('select name from pod_boulder._migrations');
+    const appliedNames = applied.map((r) => r.name);
+    for (const file of diskFiles) {
+      expect(appliedNames, `expected '${file}' to be recorded as applied`).toContain(file);
+    }
+    await db.close();
+  });
+
+  it('is idempotent per schema: a second run leaves the applied-migrations row count unchanged', async () => {
+    const db = await createTestDb();
+    await migratePod(db, 'boulder');
+    const before = await db.query('select name from pod_boulder._migrations order by name');
+
     await migratePod(db, 'boulder'); // second run should apply nothing new
-    const rows = await db.query('select name from pod_boulder._migrations');
-    expect(rows.length).toBe(1);
+    const after = await db.query('select name from pod_boulder._migrations order by name');
+
+    expect(after).toEqual(before);
     await db.close();
   });
 });
