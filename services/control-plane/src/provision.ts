@@ -11,7 +11,7 @@ import {
 import { VOCAB_VERSION } from '@passport/vocab';
 import { ServiceError, type PodContext } from './kit.js';
 import { encryptPrivateKey } from './keys.js';
-import { latestPolicy, loadPodSigner, podDid, podKeyRow, podRow, policyUrl } from './pods.js';
+import { latestPolicy, loadPodSigner, podDid, podKeyRow, podRow, policyUrl, type PodRow } from './pods.js';
 
 export type StepStatus = 'created' | 'unchanged' | 'updated';
 
@@ -193,70 +193,84 @@ export async function provisionPod(input: ProvisionInput): Promise<ProvisionResu
   });
   steps.push({ name: 'trust-policy', status: policyCreated ? 'created' : 'unchanged', ...(policyCreated ? { detail: 'version 1' } : {}) });
 
-  // 6. manifest ---------------------------------------------------------------------------
-  let signedManifest: BioregionManifest;
-  pod = await podRow(db, slug);
-  if (pod && pod.manifest_hash === hash && pod.status === 'active' && pod.manifest.proof) {
-    signedManifest = pod.manifest;
-    steps.push({ name: 'manifest', status: 'unchanged', detail: hash });
-  } else {
-    const firstTime = !pod?.manifest_hash;
-    const signedAt = now().toISOString();
-    signedManifest = signer.sign(unsigned, { created: signedAt }) as BioregionManifest;
-    await db.query(
-      `insert into platform.pods (slug, did, name, manifest, manifest_hash, status, updated_at)
-       values ($1, $2, $3, $4, $5, 'active', now())
-       on conflict (slug) do update set did = excluded.did, name = excluded.name, manifest = excluded.manifest,
-         manifest_hash = excluded.manifest_hash, status = 'active', updated_at = now()`,
-      [slug, did, signedManifest.identity.name, JSON.stringify(signedManifest), hash],
-    );
-    const versionRows = await db.query<{ v: number }>(
-      'insert into platform.manifest_versions (slug, version, manifest, manifest_hash, signed_at) ' +
-        'select $1, coalesce(max(version), 0) + 1, $2, $3, $4 from platform.manifest_versions where slug = $1 returning version as v',
-      [slug, JSON.stringify(signedManifest), hash, signedAt],
-    );
-    const downgrade = [
-      ...(removedAnchors.length ? [`removed anchors: ${removedAnchors.join(', ')}`] : []),
-      ...(schemaLowered ? ['$schema lowered'] : []),
-    ];
-    steps.push({
-      name: 'manifest',
-      status: firstTime ? 'created' : 'updated',
-      detail: [`version ${versionRows[0]?.v ?? '?'}`, hash, ...downgrade].join('; '),
-    });
-  }
+  // 6. manifest + 7. registry -------------------------------------------------------------
+  // One transaction: the pods upsert, its manifest_versions row and the registry entry commit
+  // together, so a failure can never leave a new manifest_hash without its history row (which
+  // later runs would read as "unchanged" and never record). The pods row is locked to serialize
+  // concurrent provisions of the same slug.
+  const { signedManifest, manifestStep, registryStep } = await db.transaction(async (tx) => {
+    const current = (
+      await tx.query<PodRow>(
+        'select slug, did, name, manifest, manifest_hash, status from platform.pods where slug = $1 for update',
+        [slug],
+      )
+    )[0];
+    let signedManifest: BioregionManifest;
+    let manifestStep: ProvisionStep;
+    if (current && current.manifest_hash === hash && current.status === 'active' && current.manifest.proof) {
+      signedManifest = current.manifest;
+      manifestStep = { name: 'manifest', status: 'unchanged', detail: hash };
+    } else {
+      const firstTime = !current?.manifest_hash;
+      const signedAt = now().toISOString();
+      signedManifest = signer.sign(unsigned, { created: signedAt }) as BioregionManifest;
+      await tx.query(
+        `insert into platform.pods (slug, did, name, manifest, manifest_hash, status, updated_at)
+         values ($1, $2, $3, $4, $5, 'active', now())
+         on conflict (slug) do update set did = excluded.did, name = excluded.name, manifest = excluded.manifest,
+           manifest_hash = excluded.manifest_hash, status = 'active', updated_at = now()`,
+        [slug, did, signedManifest.identity.name, JSON.stringify(signedManifest), hash],
+      );
+      const versionRows = await tx.query<{ v: number }>(
+        'insert into platform.manifest_versions (slug, version, manifest, manifest_hash, signed_at) ' +
+          'select $1, coalesce(max(version), 0) + 1, $2, $3, $4 from platform.manifest_versions where slug = $1 returning version as v',
+        [slug, JSON.stringify(signedManifest), hash, signedAt],
+      );
+      const downgrade = [
+        ...(removedAnchors.length ? [`removed anchors: ${removedAnchors.join(', ')}`] : []),
+        ...(schemaLowered ? ['$schema lowered'] : []),
+      ];
+      manifestStep = {
+        name: 'manifest',
+        status: firstTime ? 'created' : 'updated',
+        detail: [`version ${versionRows[0]?.v ?? '?'}`, hash, ...downgrade].join('; '),
+      };
+    }
 
-  // 7. registry ---------------------------------------------------------------------------
-  const entry = {
-    did,
-    anchors: signedManifest.governance.anchors,
-    accepted_issuers: [did],
-    vocab_version: String(VOCAB_VERSION),
-  };
-  const existing = (
-    await db.query<{ did: string; anchors: string[]; accepted_issuers: string[]; vocab_version: string | null }>(
-      'select did, anchors, accepted_issuers, vocab_version from platform.registry_entries where slug = $1',
-      [slug],
-    )
-  )[0];
-  if (
-    existing &&
-    existing.did === entry.did &&
-    sameJson(existing.anchors, entry.anchors) &&
-    sameJson(existing.accepted_issuers, entry.accepted_issuers) &&
-    existing.vocab_version === entry.vocab_version
-  ) {
-    steps.push({ name: 'registry', status: 'unchanged' });
-  } else {
-    await db.query(
-      `insert into platform.registry_entries (slug, did, anchors, accepted_issuers, vocab_version, updated_at)
-       values ($1, $2, $3, $4, $5, now())
-       on conflict (slug) do update set did = excluded.did, anchors = excluded.anchors,
-         accepted_issuers = excluded.accepted_issuers, vocab_version = excluded.vocab_version, updated_at = now()`,
-      [slug, entry.did, JSON.stringify(entry.anchors), JSON.stringify(entry.accepted_issuers), entry.vocab_version],
-    );
-    steps.push({ name: 'registry', status: existing ? 'updated' : 'created' });
-  }
+    const entry = {
+      did,
+      anchors: signedManifest.governance.anchors,
+      accepted_issuers: [did],
+      vocab_version: String(VOCAB_VERSION),
+    };
+    const existing = (
+      await tx.query<{ did: string; anchors: string[]; accepted_issuers: string[]; vocab_version: string | null }>(
+        'select did, anchors, accepted_issuers, vocab_version from platform.registry_entries where slug = $1',
+        [slug],
+      )
+    )[0];
+    let registryStep: ProvisionStep;
+    if (
+      existing &&
+      existing.did === entry.did &&
+      sameJson(existing.anchors, entry.anchors) &&
+      sameJson(existing.accepted_issuers, entry.accepted_issuers) &&
+      existing.vocab_version === entry.vocab_version
+    ) {
+      registryStep = { name: 'registry', status: 'unchanged' };
+    } else {
+      await tx.query(
+        `insert into platform.registry_entries (slug, did, anchors, accepted_issuers, vocab_version, updated_at)
+         values ($1, $2, $3, $4, $5, now())
+         on conflict (slug) do update set did = excluded.did, anchors = excluded.anchors,
+           accepted_issuers = excluded.accepted_issuers, vocab_version = excluded.vocab_version, updated_at = now()`,
+        [slug, entry.did, JSON.stringify(entry.anchors), JSON.stringify(entry.accepted_issuers), entry.vocab_version],
+      );
+      registryStep = { name: 'registry', status: existing ? 'updated' : 'created' };
+    }
+    return { signedManifest, manifestStep, registryStep };
+  });
+  steps.push(manifestStep, registryStep);
 
   // 8. seed-records -----------------------------------------------------------------------
   if (input.deps?.seedRecords) {

@@ -333,3 +333,26 @@ describe('fix round 1', () => {
     await expect(loadPodSigner(db, 'tenant-zero', MASTER)).rejects.toThrow(/3-byte IV; expected 12/);
   });
 });
+
+describe('fix round 2', () => {
+  it('rolls back the manifest change when the version insert fails', async () => {
+    const first = await provision(boulderManifest);
+    const before = (await db.query("select manifest_hash, manifest from platform.pods where slug = 'boulder'"))[0];
+    // Make the next version insert fail (version 2 would violate this constraint).
+    await db.query('alter table platform.manifest_versions add constraint only_v1 check (version < 2)');
+    const changed = { ...boulderManifest, governance: { ...boulderManifest.governance, anchors: ['did:key:zNew'] } };
+    await expect(provision(changed)).rejects.toThrow();
+    const after = (await db.query("select manifest_hash, manifest from platform.pods where slug = 'boulder'"))[0];
+    expect(after.manifest_hash).toBe(before.manifest_hash);
+    expect(after.manifest).toEqual(first.manifest);
+    const reg = (await db.query("select anchors from platform.registry_entries where slug = 'boulder'"))[0];
+    expect(reg.anchors).toEqual([]);
+    // Once the failure is gone the change is applied and recorded, not skipped as "unchanged".
+    await db.query('alter table platform.manifest_versions drop constraint only_v1');
+    const retry = await provision(changed);
+    expect(retry.steps.find((s) => s.name === 'manifest')?.status).toBe('updated');
+    expect(retry.steps.find((s) => s.name === 'registry')?.status).toBe('updated');
+    const versions = await db.query("select version from platform.manifest_versions where slug = 'boulder' order by version");
+    expect(versions.map((v: any) => v.version)).toEqual([1, 2]);
+  });
+});
