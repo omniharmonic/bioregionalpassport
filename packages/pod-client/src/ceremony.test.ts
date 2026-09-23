@@ -168,7 +168,7 @@ describe('ceremony over a relay', () => {
     expect(await ca.pollPeerWitnessResult(bDid)).toBeUndefined();
 
     const vwcFor = (key: KeyPair, edge: string, task: string) =>
-      signDocument(buildWitness({ issuer: POD_DID, edgeDigest: edge, taskContext: task, taskDigest: 'zTask', evidence: 'liveness', validFrom: new Date().toISOString() }), key);
+      signDocument(buildWitness({ issuer: POD_DID, edgeDigest: edge, taskContext: task, taskDigest: 'zTask', evidence: 'liveness', validUntil: new Date(Date.now() + 365 * 864e5).toISOString() }), key);
     const post = (vwc: unknown) => relay.post(channel.channel, 'someone', { type: 'org.bioregion.witness.result', createdAt: new Date().toISOString(), seq: 1, vwc });
     await post(vwcFor(keyPairForDid(POD_DID, generateKeyPair().privateKey), met.edgeDigest, 'meet-x'));
     await post(vwcFor(podKey, 'zSomeOtherEdge', 'meet-x'));

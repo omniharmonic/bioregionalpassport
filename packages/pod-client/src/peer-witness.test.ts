@@ -90,7 +90,7 @@ describe('peer witnessing against the real pod VTA', () => {
     // A forged answer (not signed by the pod) neither hides the request nor reaches the requesters.
     const forger = keyPairForDid(POD_DID, generateKeyPair().privateKey);
     const forged = signDocument(
-      buildWitness({ issuer: POD_DID, edgeDigest: met.edgeDigest, taskContext: `${MEETING_PREFIX}forged`, taskDigest: 'zForged', evidence: 'liveness', validFrom: new Date().toISOString() }),
+      buildWitness({ issuer: POD_DID, edgeDigest: met.edgeDigest, taskContext: `${MEETING_PREFIX}forged`, taskDigest: 'zForged', evidence: 'liveness', validUntil: new Date(Date.now() + 365 * 864e5).toISOString() }),
       forger,
     );
     await alice.client.relayPost(channel.channel, alice.persona.did, { type: 'org.bioregion.witness.result', createdAt: new Date().toISOString(), seq: 99, vwc: forged });
