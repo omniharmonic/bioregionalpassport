@@ -98,6 +98,23 @@ describe('DIDs and resolver', () => {
     await expect(resolver.resolve('did:example:123')).rejects.toThrow(/Unsupported/);
   });
 
+  it('expires cached documents after ttlMs', async () => {
+    const kp = generateKeyPair();
+    let calls = 0;
+    const webFetch = async () => {
+      calls++;
+      return didWebDocument('did:web:example.org', kp.publicKeyMultibase);
+    };
+    const cached = createResolver({ webFetch });
+    await cached.resolve('did:web:example.org');
+    await cached.resolve('did:web:example.org');
+    expect(calls).toBe(1);
+    const noCache = createResolver({ webFetch, ttlMs: 0 });
+    await noCache.resolve('did:web:example.org');
+    await noCache.resolve('did:web:example.org');
+    expect(calls).toBe(3);
+  });
+
   it('rejects a did:web document whose id does not match', async () => {
     const kp = generateKeyPair();
     const resolver = createResolver({ webFetch: async () => didWebDocument('did:web:other.org', kp.publicKeyMultibase) });

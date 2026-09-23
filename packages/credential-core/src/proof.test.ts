@@ -76,6 +76,52 @@ describe('eddsa-jcs-2022 proofs', () => {
     expect(r.error).toMatch(/issuer/);
   });
 
+  it('refuses a credential forged with proofPurpose authentication (Critical 1)', async () => {
+    const podDid = didWebFromDomainPath('bioregionalpassport.org', 'dids', 'boulder');
+    const attacker = generateKeyPair();
+    const vc = { '@context': ['https://www.w3.org/ns/credentials/v2'], type: ['VerifiableCredential', 'MembershipCredential'], issuer: podDid, credentialSubject: { id: attacker.did } };
+    const forged = signDocument(vc, attacker, { proofPurpose: 'authentication' });
+    const r = await verifyDocument(forged, resolver);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/issuer/);
+    // even the real issuer must use assertionMethod for a credential
+    const self = { ...vc, issuer: attacker.did };
+    const wrongPurpose = await verifyDocument(signDocument(self, attacker, { proofPurpose: 'authentication' }), resolver);
+    expect(wrongPurpose.ok).toBe(false);
+    expect(wrongPurpose.error).toMatch(/assertionMethod/);
+  });
+
+  it('refuses a presentation for a victim holder signed with assertionMethod (Critical 1)', async () => {
+    const victim = generateKeyPair();
+    const attacker = generateKeyPair();
+    const vp = { '@context': ['https://www.w3.org/ns/credentials/v2'], type: ['VerifiablePresentation'], holder: victim.did, verifiableCredential: [] };
+    const forged = signDocument(vp, attacker, { proofPurpose: 'assertionMethod', challenge: 'c', domain: 'd' });
+    const r = await verifyDocument(forged, resolver, { challenge: 'c', domain: 'd' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/holder/);
+    const ownWrongPurpose = signDocument({ ...vp, holder: attacker.did }, attacker, { proofPurpose: 'assertionMethod', challenge: 'c', domain: 'd' });
+    expect((await verifyDocument(ownWrongPurpose, resolver, { challenge: 'c', domain: 'd' })).error).toMatch(/authentication/);
+  });
+
+  it('validates proof.created', async () => {
+    const kp = generateKeyPair();
+    expect(() => signDocument({ x: 1 }, kp, { created: 'yesterday' })).toThrow(/dateTime/);
+    const signed = signDocument({ x: 1 }, kp);
+    const r = await verifyDocument({ ...signed, proof: { ...signed.proof, created: 'not-a-date' } }, resolver);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/created/);
+  });
+
+  it('refuses a verification method whose controller is another DID', async () => {
+    const did = 'did:web:bioregionalpassport.org:dids:boulder';
+    const key = keyPairForDid(did, generateKeyPair().privateKey);
+    const doc = didWebDocument(did, key.publicKeyMultibase);
+    doc.verificationMethod[0]!.controller = 'did:web:evil.example';
+    const r = await verifyDocument(signDocument({ issuer: did }, key), createResolver({ staticDocs: { [did]: doc } }));
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/controlled/);
+  });
+
   it('binds challenge and domain', async () => {
     const kp = generateKeyPair();
     const signed = signDocument({ holder: kp.did }, kp, { proofPurpose: 'authentication', challenge: 'c1', domain: 'boulder.example' });

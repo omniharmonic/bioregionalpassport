@@ -66,6 +66,8 @@ export function didWebToUrl(did: string): string {
   return path.length ? `https://${domain}/${path.join('/')}/did.json` : `https://${domain}/.well-known/did.json`;
 }
 
+export const DEFAULT_RESOLVER_TTL_MS = 5 * 60_000;
+
 async function defaultWebFetch(url: string): Promise<any> {
   const res = await fetch(url, { headers: { accept: 'application/did+json, application/json' } });
   if (!res.ok) throw new Error(`DID document fetch failed (${res.status}) for ${url}`);
@@ -74,16 +76,17 @@ async function defaultWebFetch(url: string): Promise<any> {
 
 /**
  * Method-agnostic resolver. Order: `staticDocs` → did:key (computed inline) → did:web (via `webFetch`,
- * default global `fetch`). Resolved documents are cached for the resolver's lifetime.
+ * default global `fetch`). Resolved documents are cached per resolver for `ttlMs` (default 5 minutes).
  */
-export function createResolver(opts: { webFetch?: (url: string) => Promise<any>; staticDocs?: Record<string, DidDocument> } = {}): DidResolver {
-  const cache = new Map<string, DidDocument>();
+export function createResolver(opts: { webFetch?: (url: string) => Promise<any>; staticDocs?: Record<string, DidDocument>; ttlMs?: number } = {}): DidResolver {
+  const cache = new Map<string, { doc: DidDocument; at: number }>();
+  const ttlMs = opts.ttlMs ?? DEFAULT_RESOLVER_TTL_MS;
   const webFetch = opts.webFetch ?? defaultWebFetch;
   return {
     async resolve(didUrl: string): Promise<DidDocument> {
       const did = didUrl.split('#')[0] as string;
       const cached = cache.get(did);
-      if (cached) return cached;
+      if (cached && Date.now() - cached.at < ttlMs) return cached.doc;
       let doc: DidDocument;
       const fromStatic = opts.staticDocs?.[did];
       if (fromStatic) doc = fromStatic;
@@ -92,7 +95,7 @@ export function createResolver(opts: { webFetch?: (url: string) => Promise<any>;
         doc = (await webFetch(didWebToUrl(did))) as DidDocument;
         if (!doc || typeof doc !== 'object' || doc.id !== did) throw new Error(`DID document id does not match ${did}.`);
       } else throw new Error(`Unsupported DID method: ${did}`);
-      cache.set(did, doc);
+      cache.set(did, { doc, at: Date.now() });
       return doc;
     },
   };

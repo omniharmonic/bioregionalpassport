@@ -24,12 +24,13 @@ export {
   type DidResolver,
   type VerificationMethod,
   createResolver,
+  DEFAULT_RESOLVER_TTL_MS,
   didKeyDocument,
   didWebDocument,
   didWebFromDomainPath,
   didWebToUrl,
 } from './did.js';
-export { type DataIntegrityProof, type ProofPurpose, signDocument, verifyDocument } from './proof.js';
+export { type DataIntegrityProof, type ProofPurpose, isDateTime, signDocument, verifyDocument } from './proof.js';
 export {
   CONTEXTS,
   type DtgType,
@@ -46,6 +47,8 @@ export {
   buildEndorsement,
   buildWitness,
   buildDelegation,
+  buildDelegationAcceptance,
+  checkAuthorityChain,
   buildAuthority,
   buildPersonaLink,
   buildAdjudication,

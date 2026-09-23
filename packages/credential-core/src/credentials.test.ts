@@ -5,6 +5,8 @@ import {
   buildAdjudication,
   buildAuthority,
   buildDelegation,
+  buildDelegationAcceptance,
+  checkAuthorityChain,
   buildEndorsement,
   buildInvitation,
   buildMembershipAck,
@@ -23,6 +25,7 @@ import {
   keyPairForDid,
   signDocument,
   verifyDocument,
+  type KeyPair,
   type VerifiableCredential,
 } from './index.js';
 
@@ -118,6 +121,17 @@ describe('builders (B3 §2 required claims)', () => {
     expect(a.credentialSubject).toMatchObject({ predicate: 'bioregion:adjudicated', object: { digestMultibase: 'zQmD' }, outcome: 'upheld' });
   });
 
+  it('enforces B3 validity ceilings for witness, adjudication and root authority', () => {
+    expect(() => buildWitness({ issuer: podDid, edgeDigest: 'e', taskContext: 't', taskDigest: 'd', evidence: 'liveness', validUntil: inDays(366) })).toThrow(/365 days/);
+    expect(() => buildAdjudication({ steward: alice.did, subject: bob.did, disputedDigest: 'z', outcome: 'o', validUntil: inDays(366) })).toThrow(/365 days/);
+    expect(() => buildAuthority({ issuer: podDid, subject: alice.did, scope: podDid, actions: ['event:attend'], validUntil: inDays(91) })).toThrow(/90 days/);
+  });
+
+  it('de-duplicates authority actions', () => {
+    const vc = buildAuthority({ issuer: podDid, subject: alice.did, scope: podDid, actions: ['a', 'b', 'a'], validUntil: inDays(1) });
+    expect(vc.credentialSubject['authority'].actions).toEqual(['a', 'b']);
+  });
+
   it('honours validFrom and bioregionScope overrides', () => {
     const vc = buildEndorsement({ issuer: alice.did, subject: bob.did, scope: 'knows', validFrom: '2026-01-01T00:00:00Z', bioregionScope: 'pairwise' });
     expect(vc.validFrom).toBe('2026-01-01T00:00:00Z');
@@ -163,6 +177,15 @@ describe('attenuation', () => {
     expect(child.credentialSubject['policyVersion']).toBe(2);
   });
 
+  it('de-duplicates actions and checks the child validity window against the parent', () => {
+    const child = attenuate(root, { issuerKey: owner, subject: staff.did, actions: ['pay:receive', 'pay:receive'], validUntil: inDays(30) });
+    expect(child.credentialSubject['authority'].actions).toEqual(['pay:receive']);
+    expect(() => attenuate(root, { issuerKey: owner, subject: staff.did, actions: ['pay:receive'], validFrom: new Date(Date.parse(root.validFrom) - DAY).toISOString(), validUntil: inDays(10) })).toThrow(/start before/);
+    // 30-day ceiling measured from the child's validFrom
+    expect(attenuate(root, { issuerKey: owner, subject: staff.did, actions: ['pay:receive'], validFrom: inDays(20), validUntil: inDays(45) }).validUntil).toBeDefined();
+    expect(() => attenuate(root, { issuerKey: owner, subject: staff.did, actions: ['pay:receive'], validFrom: inDays(95), validUntil: inDays(96) })).toThrow();
+  });
+
   it('refuses actions outside the parent', () => {
     expect(() => attenuate(root, { issuerKey: owner, subject: staff.did, actions: ['pay:receive', 'credit:account'], validUntil: inDays(30) })).toThrow(/does not hold/);
   });
@@ -196,35 +219,119 @@ describe('delegation chain (structural)', () => {
   const group = generateKeyPair();
   const s1 = generateKeyPair();
   const s2 = generateKeyPair();
-  const hop = (issuer: string, subject: string, extra: Partial<Parameters<typeof buildDelegation>[0]> = {}) =>
-    buildDelegation({ group: issuer, steward: subject, scope: ['round:vote'], validUntil: inDays(30), accepts: 'zQmAccepted', ...extra });
+  const grant = (issuer: KeyPair, subject: string, extra: Partial<Parameters<typeof buildDelegation>[0]> = {}) =>
+    signDocument(buildDelegation({ group: issuer.did, steward: subject, scope: ['round:vote'], validUntil: inDays(30), ...extra }), issuer);
+  const accept = (g: VerifiableCredential, steward: KeyPair, validUntil = inDays(30)) =>
+    signDocument(buildDelegationAcceptance({ steward: steward.did, group: g.issuer, grantDigest: digestMultibase(g), validUntil, scope: g.credentialSubject['delegation'].scope }), steward);
 
-  it('accepts a single accepted hop', () => {
-    expect(checkDelegationChain([hop(group.did, s1.did)], { actor: s1.did, requiredScope: 'round:vote' })).toEqual({ ok: true, principal: group.did });
+  it('builds an acceptance mirroring the grant', () => {
+    const g = grant(group, s1.did);
+    const a = accept(g, s1);
+    expect(a.type).toEqual(['VerifiableCredential', 'DelegationCredential']);
+    expect(a.issuer).toBe(s1.did);
+    expect(a.credentialSubject.id).toBe(group.did);
+    expect(a.credentialSubject['delegation']).toEqual({ scope: ['round:vote'], accepts: digestMultibase(g) });
   });
 
-  it('requires acceptance', () => {
-    const r = checkDelegationChain([hop(group.did, s1.did, { accepts: undefined })], { actor: s1.did, requiredScope: 'round:vote' });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/accepted/);
+  it('accepts a single accepted hop', () => {
+    const g = grant(group, s1.did);
+    expect(checkDelegationChain([g], { actor: s1.did, requiredScope: 'round:vote', acceptances: [accept(g, s1)] })).toEqual({ ok: true, principal: group.did });
+  });
+
+  it('requires a real acceptance of that exact grant by its steward', () => {
+    const g = grant(group, s1.did);
+    const none = checkDelegationChain([g], { actor: s1.did, requiredScope: 'round:vote', acceptances: [] });
+    expect(none.ok).toBe(false);
+    expect(none.reason).toMatch(/accepted/);
+    // a truthy `accepts` on the grant itself is not acceptance
+    const selfAccepted = grant(group, s1.did, { accepts: 'zQmWhatever' });
+    expect(checkDelegationChain([selfAccepted], { actor: s1.did, requiredScope: 'round:vote', acceptances: [] }).ok).toBe(false);
+    // acceptance of a different grant
+    const other = grant(group, s1.did, { scope: ['round:vote', 'round:propose'] });
+    expect(checkDelegationChain([g], { actor: s1.did, requiredScope: 'round:vote', acceptances: [accept(other, s1)] }).ok).toBe(false);
+    // acceptance by someone other than the steward
+    const forged = signDocument(buildDelegationAcceptance({ steward: s2.did, group: group.did, grantDigest: digestMultibase(g), validUntil: inDays(30) }), s2);
+    expect(checkDelegationChain([g], { actor: s1.did, requiredScope: 'round:vote', acceptances: [forged] }).ok).toBe(false);
+    // expired acceptance
+    const a = accept(g, s1, inDays(1));
+    expect(checkDelegationChain([g], { actor: s1.did, requiredScope: 'round:vote', acceptances: [a], now: new Date(Date.now() + 2 * DAY) }).ok).toBe(false);
   });
 
   it('requires the scope', () => {
-    expect(checkDelegationChain([hop(group.did, s1.did)], { actor: s1.did, requiredScope: 'round:propose' }).ok).toBe(false);
+    const g = grant(group, s1.did);
+    expect(checkDelegationChain([g], { actor: s1.did, requiredScope: 'round:propose', acceptances: [accept(g, s1)] }).ok).toBe(false);
   });
 
   it('respects maxDepth', () => {
-    const shallow = [hop(group.did, s1.did), hop(s1.did, s2.did)];
-    expect(checkDelegationChain(shallow, { actor: s2.did, requiredScope: 'round:vote' }).reason).toMatch(/depth/);
-    const deep = [hop(group.did, s1.did, { maxDepth: 1 }), hop(s1.did, s2.did)];
-    expect(checkDelegationChain(deep, { actor: s2.did, requiredScope: 'round:vote' })).toEqual({ ok: true, principal: group.did });
+    const g1 = grant(group, s1.did);
+    const g2 = grant(s1, s2.did);
+    const acc = [accept(g1, s1), accept(g2, s2)];
+    expect(checkDelegationChain([g1, g2], { actor: s2.did, requiredScope: 'round:vote', acceptances: acc }).reason).toMatch(/depth/);
+    const d1 = grant(group, s1.did, { maxDepth: 1 });
+    expect(checkDelegationChain([d1, g2], { actor: s2.did, requiredScope: 'round:vote', acceptances: [accept(d1, s1), accept(g2, s2)] })).toEqual({ ok: true, principal: group.did });
   });
 
   it('detects a broken hop, wrong actor and expiry', () => {
-    const broken = [hop(group.did, s1.did, { maxDepth: 1 }), hop(bob.did, s2.did)];
-    expect(checkDelegationChain(broken, { actor: s2.did, requiredScope: 'round:vote' }).reason).toMatch(/not issued/);
-    expect(checkDelegationChain([hop(group.did, s1.did)], { actor: s2.did, requiredScope: 'round:vote' }).ok).toBe(false);
-    expect(checkDelegationChain([hop(group.did, s1.did)], { actor: s1.did, requiredScope: 'round:vote', now: new Date(Date.now() + 31 * DAY) }).reason).toMatch(/expired/);
-    expect(checkDelegationChain([], { actor: s1.did, requiredScope: 'round:vote' }).ok).toBe(false);
+    const d1 = grant(group, s1.did, { maxDepth: 1 });
+    const fromBob = grant(bob, s2.did);
+    expect(checkDelegationChain([d1, fromBob], { actor: s2.did, requiredScope: 'round:vote', acceptances: [accept(d1, s1), accept(fromBob, s2)] }).reason).toMatch(/not issued/);
+    const g = grant(group, s1.did);
+    const acc = [accept(g, s1)];
+    expect(checkDelegationChain([g], { actor: s2.did, requiredScope: 'round:vote', acceptances: acc }).ok).toBe(false);
+    expect(checkDelegationChain([g], { actor: s1.did, requiredScope: 'round:vote', acceptances: acc, now: new Date(Date.now() + 31 * DAY) }).reason).toMatch(/expired/);
+    expect(checkDelegationChain([], { actor: s1.did, requiredScope: 'round:vote', acceptances: [] }).ok).toBe(false);
+  });
+});
+
+describe('authority chain (structural)', () => {
+  const owner = generateKeyPair();
+  const staff = generateKeyPair();
+  const temp = generateKeyPair();
+  const enterprise = 'did:web:bioregionalpassport.org:enterprises:bakery';
+  const mkRoot = (maxDepth?: number) =>
+    signDocument(buildAuthority({ issuer: podDid, subject: owner.did, scope: enterprise, actions: ['pay:receive', 'pay:refund'], validUntil: inDays(90), maxDepth }), podKey);
+
+  it('accepts a root alone and a valid attenuation', () => {
+    const root = mkRoot();
+    expect(checkAuthorityChain([root])).toEqual({ ok: true, root });
+    const child = signDocument(attenuate(root, { issuerKey: owner, subject: staff.did, actions: ['pay:receive'], validUntil: inDays(30) }), owner);
+    expect(checkAuthorityChain([root, child])).toEqual({ ok: true, root });
+  });
+
+  it('accepts depth 2 only when the root allows it', () => {
+    const root = mkRoot(2);
+    const c1 = signDocument(attenuate(root, { issuerKey: owner, subject: staff.did, actions: ['pay:receive'], validUntil: inDays(30) }), owner);
+    const c2 = signDocument(attenuate(c1, { issuerKey: staff, subject: temp.did, actions: ['pay:receive'], validUntil: inDays(20) }), staff);
+    expect(checkAuthorityChain([root, c1, c2]).ok).toBe(true);
+  });
+
+  it('rejects hand-forged children that skip attenuate()', () => {
+    const root = mkRoot();
+    const c1 = signDocument(attenuate(root, { issuerKey: owner, subject: staff.did, actions: ['pay:receive'], validUntil: inDays(30) }), owner);
+    const forge = (over: Record<string, any>, issuer = staff, extra: Record<string, any> = {}) =>
+      signDocument(buildAuthority({ issuer: issuer.did, subject: temp.did, scope: enterprise, actions: ['pay:receive'], validUntil: inDays(20), parent: digestMultibase(c1), depth: 2, ...over, ...extra } as any), issuer);
+    // depth beyond default root maxDepth (1), even if the forger lies about maxDepth
+    expect(checkAuthorityChain([root, c1, forge({})]).reason).toMatch(/depth/);
+    expect(checkAuthorityChain([root, c1, forge({ maxDepth: 5 })]).ok).toBe(false);
+    // lying about depth
+    const rootDeep = mkRoot(2);
+    const d1 = signDocument(attenuate(rootDeep, { issuerKey: owner, subject: staff.did, actions: ['pay:receive'], validUntil: inDays(30) }), owner);
+    const good = { parent: digestMultibase(d1), maxDepth: 2 };
+    expect(checkAuthorityChain([rootDeep, d1, forge({ ...good, depth: 1 })]).reason).toMatch(/depth 2/);
+    expect(checkAuthorityChain([rootDeep, d1, forge({ ...good, maxDepth: 3 })]).reason).toMatch(/maxDepth/);
+    expect(checkAuthorityChain([rootDeep, d1, forge({ ...good, actions: ['pay:refund'] })]).reason).toMatch(/does not hold/);
+    expect(checkAuthorityChain([rootDeep, d1, forge({ ...good, scope: 'did:web:other' })]).reason).toMatch(/scope/);
+    expect(checkAuthorityChain([rootDeep, d1, forge({ ...good, parent: digestMultibase(rootDeep) })]).reason).toMatch(/parent/);
+    expect(checkAuthorityChain([rootDeep, d1, forge(good, owner)]).reason).toMatch(/issued by the holder/);
+    expect(checkAuthorityChain([rootDeep, d1, forge({ ...good, validUntil: inDays(31) })]).reason).toMatch(/outlives/);
+    expect(checkAuthorityChain([rootDeep, d1, forge({ ...good, validFrom: new Date(Date.now() - DAY).toISOString() })]).reason).toMatch(/starts before/);
+    expect(checkAuthorityChain([rootDeep, d1, forge(good)]).ok).toBe(true);
+  });
+
+  it('rejects a non-root first element and empty chains', () => {
+    const root = mkRoot();
+    const c1 = signDocument(attenuate(root, { issuerKey: owner, subject: staff.did, actions: ['pay:receive'], validUntil: inDays(30) }), owner);
+    expect(checkAuthorityChain([c1]).ok).toBe(false);
+    expect(checkAuthorityChain([]).ok).toBe(false);
   });
 });

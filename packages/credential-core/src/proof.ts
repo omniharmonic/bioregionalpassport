@@ -17,6 +17,10 @@ export interface DataIntegrityProof {
 
 const PURPOSES: ProofPurpose[] = ['assertionMethod', 'authentication'];
 
+const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+/** ISO 8601 / XML Schema dateTimeStamp (timezone required). */
+export const isDateTime = (v: unknown): v is string => typeof v === 'string' && DATE_TIME.test(v) && !Number.isNaN(Date.parse(v));
+
 /**
  * eddsa-jcs-2022 hashData (W3C Data Integrity EdDSA Cryptosuites v1 §3.3):
  * sha256(JCS(proofConfig)) ‖ sha256(JCS(unsecured document)), where proofConfig is the proof
@@ -42,6 +46,7 @@ export function signDocument<T extends object>(
   if ((doc as Record<string, unknown>)['proof'] !== undefined) throw new Error('Document is already signed.');
   const proofPurpose = (opts.proofPurpose ?? 'assertionMethod') as ProofPurpose;
   if (!PURPOSES.includes(proofPurpose)) throw new Error(`Unsupported proofPurpose: ${opts.proofPurpose}`);
+  if (opts.created !== undefined && !isDateTime(opts.created)) throw new Error(`created is not a valid ISO 8601 dateTime: ${opts.created}`);
   const options: Omit<DataIntegrityProof, 'proofValue'> = {
     type: 'DataIntegrityProof',
     cryptosuite: 'eddsa-jcs-2022',
@@ -66,6 +71,7 @@ const absolute = (ref: string, did: string): string => (ref.startsWith('#') ? di
 function findMethod(doc: DidDocument, vmId: string, purpose: ProofPurpose) {
   const vm = (doc.verificationMethod ?? []).find((m) => absolute(m.id, doc.id) === vmId);
   if (!vm) return { error: `Verification method ${vmId} is not in the DID document.` };
+  if (absolute(vm.controller, doc.id) !== doc.id) return { error: `Verification method ${vmId} is not controlled by ${doc.id}.` };
   const rel = (doc[purpose] ?? []) as unknown[];
   const authorized = rel.some((r) => {
     const id = idOf(r);
@@ -79,9 +85,10 @@ function findMethod(doc: DidDocument, vmId: string, purpose: ProofPurpose) {
  * Verify a DataIntegrityProof (eddsa-jcs-2022). The controller DID is the part of
  * `proof.verificationMethod` before `#`; it is resolved and the method must be listed under the proof's purpose.
  *
- * Binding checks (beyond the signature):
- * - `assertionMethod` proofs on documents with an `issuer` must be made by that issuer;
- * - `authentication` proofs on documents with a `holder` must be made by that holder;
+ * Binding checks (beyond the signature), whatever the proof purpose:
+ * - a document with an `issuer` (credential) must be signed by that issuer, with `assertionMethod`;
+ * - a document with a `holder` (presentation) must be signed by that holder, with `authentication`;
+ * - `proof.created` must be an ISO 8601 dateTime and the method's `controller` must be the resolved DID;
  * - `opts.challenge` / `opts.domain` / `opts.proofPurpose`, when given, must equal the proof's values.
  */
 export async function verifyDocument(
@@ -105,13 +112,19 @@ export async function verifyDocument(
     if (opts.challenge !== undefined && proof.challenge !== opts.challenge) return { ok: false, error: 'Challenge does not match.' };
     if (opts.domain !== undefined && proof.domain !== opts.domain) return { ok: false, error: 'Domain does not match.' };
 
+    if (!isDateTime(proof.created)) return { ok: false, error: 'Proof created is not a valid ISO 8601 dateTime.' };
+
     const controller = proof.verificationMethod.split('#')[0] as string;
     const unsecured = withoutProof(doc);
-    if (proof.proofPurpose === 'assertionMethod' && unsecured['issuer'] !== undefined && idOf(unsecured['issuer']) !== controller) {
-      return { ok: false, error: 'Proof was not made by the credential issuer.' };
+    // Signer binding holds regardless of proof purpose: a credential must be signed by its issuer with
+    // assertionMethod, a presentation by its holder with authentication.
+    if (unsecured['issuer'] !== undefined) {
+      if (idOf(unsecured['issuer']) !== controller) return { ok: false, error: 'Proof was not made by the credential issuer.' };
+      if (proof.proofPurpose !== 'assertionMethod') return { ok: false, error: 'A credential proof must use proofPurpose assertionMethod.' };
     }
-    if (proof.proofPurpose === 'authentication' && unsecured['holder'] !== undefined && idOf(unsecured['holder']) !== controller) {
-      return { ok: false, error: 'Proof was not made by the presentation holder.' };
+    if (unsecured['holder'] !== undefined) {
+      if (idOf(unsecured['holder']) !== controller) return { ok: false, error: 'Proof was not made by the presentation holder.' };
+      if (proof.proofPurpose !== 'authentication') return { ok: false, error: 'A presentation proof must use proofPurpose authentication.' };
     }
 
     const didDoc = await resolver.resolve(controller);
