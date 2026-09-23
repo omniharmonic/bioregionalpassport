@@ -16,7 +16,7 @@ export interface DirectoryEntry {
 }
 
 export async function listDirectory(ctx: PodContext, filter: DirectoryFilter = {}): Promise<DirectoryEntry[]> {
-  const enterprises = await listRecords(ctx, 'enterprise', {
+  const { rows: enterprises } = await listRecords(ctx, 'enterprise', {
     category: filter.category,
     q: filter.q,
     acceptsLocalCredit: filter.acceptsLocalCredit,
@@ -32,8 +32,8 @@ export async function listDirectory(ctx: PodContext, filter: DirectoryFilter = {
     entries.push({
       uri: enterprise.uri,
       record: enterprise.record,
-      offerCount: offers.length,
-      needCount: needs.length,
+      offerCount: offers.rows.length,
+      needCount: needs.rows.length,
     });
   }
   return entries;

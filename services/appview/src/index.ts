@@ -22,6 +22,7 @@ export {
 export {
   type RecordRow,
   type RecordFilter,
+  type RecordPage,
   listRecords,
   getRecord,
   putRecord,

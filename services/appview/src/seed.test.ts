@@ -10,22 +10,22 @@ describe('seedDemoRecords', () => {
     await withTestPod(db, 'boulder', boulderManifest, async (ctx) => {
       await seedDemoRecords(ctx);
 
-      const enterprises = await listRecords(ctx, 'enterprise', { limit: 100 });
+      const { rows: enterprises } = await listRecords(ctx, 'enterprise', { limit: 100 });
       expect(enterprises).toHaveLength(8);
       expect(enterprises.every((e) => e.authorDid === ctx.podDid)).toBe(true);
 
-      const events = await listRecords(ctx, 'event', { limit: 100 });
+      const { rows: events } = await listRecords(ctx, 'event', { limit: 100 });
       expect(events).toHaveLength(3);
       expect(events.filter((e) => e.record.attestation === true)).toHaveLength(1);
 
-      const groups = await listRecords(ctx, 'group', { limit: 100 });
+      const { rows: groups } = await listRecords(ctx, 'group', { limit: 100 });
       expect(groups).toHaveLength(2);
 
-      const offers = await listRecords(ctx, 'offer', { limit: 100 });
+      const { rows: offers } = await listRecords(ctx, 'offer', { limit: 100 });
       expect(offers).toHaveLength(3);
       expect(offers.every((o) => o.authorDid === ctx.podDid)).toBe(true);
 
-      const needs = await listRecords(ctx, 'need', { limit: 100 });
+      const { rows: needs } = await listRecords(ctx, 'need', { limit: 100 });
       expect(needs).toHaveLength(2);
     });
     await db.close();
@@ -38,7 +38,7 @@ describe('seedDemoRecords', () => {
       const before = await listRecords(ctx, 'enterprise', { limit: 100 });
       await seedDemoRecords(ctx);
       const after = await listRecords(ctx, 'enterprise', { limit: 100 });
-      expect(after).toHaveLength(before.length);
+      expect(after.rows).toHaveLength(before.rows.length);
     });
     await db.close();
   });
@@ -55,12 +55,12 @@ describe('seedDemoRecords', () => {
 
     await withPod(db, 'tenant-zero', async (tx) => {
       const ctx = buildCtx(tx, 'tenant-zero', tenantZeroManifest);
-      const enterprises = await listRecords(ctx, 'enterprise', { limit: 100 });
+      const { rows: enterprises } = await listRecords(ctx, 'enterprise', { limit: 100 });
       expect(enterprises).toHaveLength(2);
-      const events = await listRecords(ctx, 'event', { limit: 100 });
+      const { rows: events } = await listRecords(ctx, 'event', { limit: 100 });
       expect(events).toHaveLength(1);
       expect(events[0]?.record.attestation).toBe(true);
-      const groups = await listRecords(ctx, 'group', { limit: 100 });
+      const { rows: groups } = await listRecords(ctx, 'group', { limit: 100 });
       expect(groups).toHaveLength(1);
 
       // None of tenant-zero's enterprises are the Boulder seed names.
@@ -70,7 +70,7 @@ describe('seedDemoRecords', () => {
 
     await withPod(db, 'boulder', async (tx) => {
       const ctx = buildCtx(tx, 'boulder', boulderManifest);
-      const enterprises = await listRecords(ctx, 'enterprise', { limit: 100 });
+      const { rows: enterprises } = await listRecords(ctx, 'enterprise', { limit: 100 });
       expect(enterprises).toHaveLength(8);
     });
 
@@ -82,9 +82,9 @@ describe('seedDemoRecords', () => {
     const manifest = { ...boulderManifest, identity: { ...boulderManifest.identity, slug: 'some-other-pod', did: 'did:web:example.org:dids:some-other-pod' } };
     await withTestPod(db, 'some-other-pod', manifest, async (ctx) => {
       await seedDemoRecords(ctx);
-      const enterprises = await listRecords(ctx, 'enterprise', { limit: 100 });
+      const { rows: enterprises } = await listRecords(ctx, 'enterprise', { limit: 100 });
       expect(enterprises).toHaveLength(1);
-      const events = await listRecords(ctx, 'event', { limit: 100 });
+      const { rows: events } = await listRecords(ctx, 'event', { limit: 100 });
       expect(events).toHaveLength(1);
       expect(events[0]?.record.attestation).toBe(true);
     });

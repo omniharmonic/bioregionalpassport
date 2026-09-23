@@ -65,11 +65,11 @@ export function createAppviewRoutes(deps: AppviewDeps = {}): Route[] {
       path: '/records/:collection',
       auth: 'none',
       handler: async (ctx, req) => {
-        const rows = await listRecords(ctx, req.params.collection ?? '', {
+        const { rows, nextCursor } = await listRecords(ctx, req.params.collection ?? '', {
           limit: req.query.limit ? Number(req.query.limit) : undefined,
           cursor: req.query.cursor || undefined,
         });
-        return { body: { records: rows } };
+        return { body: { records: rows, nextCursor } };
       },
     },
     {

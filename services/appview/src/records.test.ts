@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createAppviewRoutes } from './routes.js';
 import { ServiceError } from './kit.js';
-import { getRecord, putRecord } from './records.js';
+import { getRecord, listRecords, putRecord } from './records.js';
+import { seedDemoRecords } from './seed.js';
 import { setupTestDb, withTestPod, boulderManifest, makeSession } from './testHelpers.js';
 
 const routes = createAppviewRoutes();
@@ -182,6 +183,112 @@ describe('POST /records/:collection route', () => {
       });
       expect(result.status).toBe(201);
       expect(result.body.record.name).toBe('X');
+    });
+    await db.close();
+  });
+});
+
+describe('keyset pagination', () => {
+  it('advances nextCursor across pages and never repeats a row (records table)', async () => {
+    const db = await setupTestDb('boulder');
+    await withTestPod(db, 'boulder', boulderManifest, async (ctx) => {
+      await seedDemoRecords(ctx); // 8 enterprises
+
+      const seen = new Set<string>();
+      let cursor: string | undefined;
+      let pageCount = 0;
+      for (;;) {
+        const page = await listRecords(ctx, 'enterprise', { limit: 3, cursor });
+        expect(page.rows.length).toBeGreaterThan(0);
+        for (const row of page.rows) {
+          expect(seen.has(row.uri)).toBe(false);
+          seen.add(row.uri);
+        }
+        pageCount++;
+        expect(pageCount).toBeLessThan(10); // guards against an infinite loop if the cursor never advances
+        if (!page.nextCursor) break;
+        expect(page.nextCursor).not.toBe(cursor); // the cursor must actually move
+        cursor = page.nextCursor;
+      }
+      expect(seen.size).toBe(8);
+      expect(pageCount).toBe(3); // 3 + 3 + 2
+    });
+    await db.close();
+  });
+
+  it('advances nextCursor across pages for the offers table too, using its uri form', async () => {
+    const db = await setupTestDb('boulder');
+    await withTestPod(db, 'boulder', boulderManifest, async (ctx) => {
+      await seedDemoRecords(ctx); // 3 offers
+
+      const page1 = await listRecords(ctx, 'offer', { limit: 2 });
+      expect(page1.rows).toHaveLength(2);
+      expect(page1.nextCursor).toBeTruthy();
+      expect(page1.nextCursor).toMatch(/^at:\/\/boulder\/org\.bioregion\.offer\//);
+
+      const page2 = await listRecords(ctx, 'offer', { limit: 2, cursor: page1.nextCursor! });
+      expect(page2.rows).toHaveLength(1);
+      expect(page2.nextCursor).toBeNull();
+
+      const page1Uris = new Set(page1.rows.map((r) => r.uri));
+      for (const row of page2.rows) {
+        expect(page1Uris.has(row.uri)).toBe(false);
+      }
+    });
+    await db.close();
+  });
+
+  it('exposes nextCursor from the GET /records/:collection route', async () => {
+    const db = await setupTestDb('boulder');
+    await withTestPod(db, 'boulder', boulderManifest, async (ctx) => {
+      await seedDemoRecords(ctx);
+      const r = route('GET', '/records/:collection');
+      const first = await r.handler(ctx, { params: { collection: 'enterprise' }, query: { limit: '3' }, body: undefined });
+      expect(first.body.records).toHaveLength(3);
+      expect(first.body.nextCursor).toBeTruthy();
+
+      const second = await r.handler(ctx, {
+        params: { collection: 'enterprise' },
+        query: { limit: '3', cursor: first.body.nextCursor },
+        body: undefined,
+      });
+      expect(second.body.records).toHaveLength(3);
+      const firstUris = new Set(first.body.records.map((row: { uri: string }) => row.uri));
+      for (const row of second.body.records) {
+        expect(firstUris.has(row.uri)).toBe(false);
+      }
+    });
+    await db.close();
+  });
+});
+
+describe('ILIKE escaping', () => {
+  it('treats a literal % in q as a literal character, not a wildcard', async () => {
+    const db = await setupTestDb('boulder');
+    await withTestPod(db, 'boulder', boulderManifest, async (ctx) => {
+      const session = makeSession('did:key:zAuthor', 'T1', []);
+      await putRecord(ctx, 'group', undefined, { name: '50% off Fest', did: 'did:web:a', contact: 'a@b.c' }, session);
+      await putRecord(ctx, 'group', undefined, { name: 'Regular Meetup', did: 'did:web:b', contact: 'b@b.c' }, session);
+
+      // Unescaped, a bare '%' ILIKE pattern ('%%%') would match every row.
+      const { rows: matches } = await listRecords(ctx, 'group', { q: '%' });
+      expect(matches).toHaveLength(1);
+      expect(matches[0]?.record.name).toBe('50% off Fest');
+    });
+    await db.close();
+  });
+
+  it('treats a literal _ in q as a literal character, not a single-char wildcard', async () => {
+    const db = await setupTestDb('boulder');
+    await withTestPod(db, 'boulder', boulderManifest, async (ctx) => {
+      const session = makeSession('did:key:zAuthor', 'T1', []);
+      await putRecord(ctx, 'group', undefined, { name: 'Neighbors United', did: 'did:web:a', contact: 'a@b.c' }, session);
+      await putRecord(ctx, 'group', undefined, { name: 'Repair_Cafe', did: 'did:web:b', contact: 'b@b.c' }, session);
+
+      // Unescaped, '_' matches any single character, so it would match both rows.
+      const { rows: matches } = await listRecords(ctx, 'group', { q: '_' });
+      expect(matches).toHaveLength(1);
+      expect(matches[0]?.record.name).toBe('Repair_Cafe');
     });
     await db.close();
   });

@@ -5,8 +5,8 @@ import { listRecords, type RecordRow } from './records.js';
 
 export async function searchRecords(ctx: PodContext, q: string): Promise<RecordRow[]> {
   if (!q.trim()) return [];
-  const results = await Promise.all(
+  const pages = await Promise.all(
     COLLECTIONS.map((collection) => listRecords(ctx, collection, { q, limit: 25 })),
   );
-  return results.flat();
+  return pages.flatMap((page) => page.rows);
 }

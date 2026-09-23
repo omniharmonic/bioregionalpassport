@@ -60,4 +60,25 @@ describe('GET /map', () => {
     });
     await db.close();
   });
+
+  it('rejects a malformed or inverted bbox with INVALID_BBOX instead of silently falling back', async () => {
+    const db = await setupTestDb('boulder');
+    await withTestPod(db, 'boulder', boulderManifest, async (ctx) => {
+      const r = route('GET', '/map');
+
+      await expect(
+        r.handler(ctx, { params: {}, query: { bbox: '1,2,3' }, body: undefined }),
+      ).rejects.toMatchObject({ status: 400, code: 'INVALID_BBOX' });
+
+      await expect(
+        r.handler(ctx, { params: {}, query: { bbox: 'not,a,valid,bbox' }, body: undefined }),
+      ).rejects.toMatchObject({ status: 400, code: 'INVALID_BBOX' });
+
+      // Inverted: maxLon < minLon.
+      await expect(
+        r.handler(ctx, { params: {}, query: { bbox: '-105.1,40.2,-105.7,39.9' }, body: undefined }),
+      ).rejects.toMatchObject({ status: 400, code: 'INVALID_BBOX' });
+    });
+    await db.close();
+  });
 });

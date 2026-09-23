@@ -71,13 +71,13 @@ function projectToSchemaOrgProject(
 export async function schemaOrgGraph(ctx: PodContext, type: string): Promise<Record<string, unknown>> {
   let graph: Record<string, unknown>[];
   if (type === 'enterprise') {
-    const rows = await listRecords(ctx, 'enterprise', { limit: 200 });
+    const { rows } = await listRecords(ctx, 'enterprise', { limit: 200 });
     graph = rows.map((row) => enterpriseToLocalBusiness(row.uri, row.record));
   } else if (type === 'event') {
-    const rows = await listRecords(ctx, 'event', { limit: 200 });
+    const { rows } = await listRecords(ctx, 'event', { limit: 200 });
     graph = rows.map((row) => eventToSchemaOrgEvent(row.uri, row.record));
   } else if (type === 'project') {
-    const rows = await listRecords(ctx, 'project', { limit: 200 });
+    const { rows } = await listRecords(ctx, 'project', { limit: 200 });
     graph = rows.map((row) => projectToSchemaOrgProject(row.uri, row.record, ctx.manifest.identity.name));
   } else {
     throw new ServiceError(400, 'UNKNOWN_SCHEMA_ORG_TYPE', `"${type}" has no schema.org mapping.`);

@@ -40,8 +40,19 @@ export interface RecordFilter {
   /** `offer`/`need` collections only: the enterprise's record uri. */
   enterpriseDid?: string;
   limit?: number;
-  /** Keyset pagination cursor: the `rkey` of the last row of the previous page. */
+  /**
+   * Keyset pagination cursor: opaque to clients — pass back exactly the
+   * `nextCursor` a previous `listRecords` call returned (the last row's
+   * `uri`, in its `at://<slug>/org.bioregion.<collection>/<rkey>` form, for
+   * every collection including `offer`/`need`).
+   */
   cursor?: string;
+}
+
+export interface RecordPage {
+  rows: RecordRow[];
+  /** The `uri` to pass as `cursor` for the next page, or `null` if this was the last page. */
+  nextCursor: string | null;
 }
 
 const OFFER_LIKE = new Set<string>(['offer', 'need']);
@@ -63,6 +74,29 @@ export function assertCollection(collection: string): Collection {
 
 function asJson(value: unknown): unknown {
   return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+/** Escapes `\`, `%`, and `_` so a user-supplied substring is safe to interpolate into an `ILIKE '%…%'` pattern. */
+function escapeLike(q: string): string {
+  return q.replace(/[\\%_]/g, '\\$&');
+}
+
+/**
+ * The `offers` table's PK is a bare `rkey` (its `uri` is derived, not
+ * stored), so a `cursor` for `offer`/`need` — which is always the row's
+ * full `uri` — has to be unwrapped back to that `rkey` before it can be
+ * compared against `id`.
+ */
+function cursorToOfferRkey(ctx: { slug: string }, collection: Collection, cursor: string): string {
+  try {
+    const parsed = parseRecordUri(cursor);
+    if (parsed.slug !== ctx.slug || parsed.collection !== collection) {
+      throw new Error('cursor collection/pod mismatch');
+    }
+    return parsed.rkey;
+  } catch {
+    throw new ServiceError(400, 'INVALID_CURSOR', 'That pagination cursor is not valid for this collection.');
+  }
 }
 
 export function mapRecordsRow(row: any): RecordRow {
@@ -98,7 +132,7 @@ export async function listRecords(
   ctx: PodContext,
   collection: string,
   filter: RecordFilter = {},
-): Promise<RecordRow[]> {
+): Promise<RecordPage> {
   const col = assertCollection(collection);
   const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
 
@@ -110,14 +144,14 @@ export async function listRecords(
       conditions.push(`enterprise_did = $${params.length}`);
     }
     if (filter.q) {
-      params.push(`%${filter.q}%`);
+      params.push(`%${escapeLike(filter.q)}%`);
       const idx = params.length;
       conditions.push(
-        `(record ->> 'resourceSpec' ILIKE $${idx} OR record ->> 'description' ILIKE $${idx})`,
+        `(record ->> 'resourceSpec' ILIKE $${idx} ESCAPE '\\' OR record ->> 'description' ILIKE $${idx} ESCAPE '\\')`,
       );
     }
     if (filter.cursor) {
-      params.push(filter.cursor);
+      params.push(cursorToOfferRkey(ctx, col, filter.cursor));
       conditions.push(`id > $${params.length}`);
     }
     params.push(limit);
@@ -125,16 +159,18 @@ export async function listRecords(
       `SELECT id, enterprise_did, kind, record FROM offers WHERE ${conditions.join(' AND ')} ORDER BY id ASC LIMIT $${params.length}`,
       params,
     );
-    return rows.map((row) => mapOfferRow(ctx.slug, col, row));
+    const mapped = rows.map((row) => mapOfferRow(ctx.slug, col, row));
+    const last = mapped.length === limit ? mapped[mapped.length - 1] : undefined;
+    return { rows: mapped, nextCursor: last ? last.uri : null };
   }
 
   const conditions: string[] = ['collection = $1'];
   const params: unknown[] = [col];
   if (filter.q) {
-    params.push(`%${filter.q}%`);
+    params.push(`%${escapeLike(filter.q)}%`);
     const idx = params.length;
     conditions.push(
-      `(record ->> 'name' ILIKE $${idx} OR record ->> 'title' ILIKE $${idx} OR record ->> 'description' ILIKE $${idx})`,
+      `(record ->> 'name' ILIKE $${idx} ESCAPE '\\' OR record ->> 'title' ILIKE $${idx} ESCAPE '\\' OR record ->> 'description' ILIKE $${idx} ESCAPE '\\')`,
     );
   }
   if (filter.category) {
@@ -146,6 +182,9 @@ export async function listRecords(
     conditions.push(`(record ->> 'acceptsLocalCredit')::boolean = $${params.length}`);
   }
   if (filter.cursor) {
+    // The cursor is the previous page's last `uri`; `uri`'s ordering matches
+    // `rkey`'s ordering for a fixed slug+collection prefix, so comparing the
+    // full uri keeps keyset pagination correct without unwrapping it.
     params.push(filter.cursor);
     conditions.push(`uri > $${params.length}`);
   }
@@ -155,7 +194,9 @@ export async function listRecords(
        FROM records WHERE ${conditions.join(' AND ')} ORDER BY uri ASC LIMIT $${params.length}`,
     params,
   );
-  return rows.map(mapRecordsRow);
+  const mapped = rows.map(mapRecordsRow);
+  const last = mapped.length === limit ? mapped[mapped.length - 1] : undefined;
+  return { rows: mapped, nextCursor: last ? last.uri : null };
 }
 
 export async function getRecord(
