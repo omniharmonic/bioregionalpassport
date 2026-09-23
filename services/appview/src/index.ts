@@ -37,4 +37,5 @@ export { type SchemaOrgType, schemaOrgGraph } from './schemaOrg.js';
 export { type ResolvedPlace, type ResolvePlaceDeps, resolvePlace } from './places.js';
 export { generateTid } from './tid.js';
 export { seedDemoRecords } from './seed.js';
+export { smokeRecord } from './smoke.js';
 export { type AppviewDeps, createAppviewRoutes } from './routes.js';
