@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Card, Explain, Field, Input, Notice, PageHeader, Textarea } from '@passport/ui-kit';
-import { abbreviateDid, exportCredentialsJson, openWallet, recoveryStatus, type OutboxRow } from '@passport/pod-client';
+import { abbreviateDid, addPodCredential, exportCredentialsJson, openWallet, recoveryStatus, type OutboxRow } from '@passport/pod-client';
 import type { VerifiableCredential } from '@passport/credential-core';
 import { Consent } from '../_components/Consent';
 import { ChoosePod } from '../_components/Onboarding';
@@ -68,8 +68,21 @@ export default function SettingsPage() {
       setPaste('');
       return;
     }
-    await w.wallet!.storeCredential(vc, pod ? { pod: pod.slug } : {});
-    setAdded(pod ? `Added to your ${pod.manifest.identity.name} credentials.` : 'Added.');
+    if (!pod) {
+      await w.wallet!.storeCredential(vc, {});
+      setAdded('Added.');
+    } else {
+      // Filed under the pod, then the session is re-opened so a new permission (e.g. to receive payments) works now.
+      const r = await addPodCredential(w.wallet!, await w.clientFor(pod.slug), vc);
+      const name = pod.manifest.identity.name;
+      setAdded(
+        r.session
+          ? `Added to your ${name} credentials, and presented to ${name} again so you can use it now.`
+          : r.error
+            ? `Added to your ${name} credentials. We could not present your passport again just now; use “Refresh my session” on your ${name} page.`
+            : `Added to your ${name} credentials.`,
+      );
+    }
     setPaste('');
     await w.reload();
   });

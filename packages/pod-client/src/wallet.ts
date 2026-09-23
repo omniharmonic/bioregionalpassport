@@ -248,15 +248,24 @@ export class Wallet {
   }
 
   /**
-   * Replaces the pod's authority set with the server's list of currently valid VACs (refresh/ack), marking older
-   * ones superseded so a revoked or lapsed VAC is never presented.
+   * Replaces the pod's tier authority set with the server's list of currently valid VACs (refresh/ack), marking
+   * older ones superseded so a revoked or lapsed VAC is never presented. Only VACs scoped to the pod itself are
+   * replaced: authority scoped elsewhere (e.g. `pay:receive` for an enterprise the person registered) is not part
+   * of the tier set the pod re-issues, so it stays active.
    */
   async replaceVacs(slug: string, vacs: VerifiableCredential[]): Promise<void> {
     const keep = new Set<string>();
     for (const vc of vacs) keep.add(await this.storeCredential(vc, { pod: slug }));
+    const pod = await this.db.pods.get(slug);
     const rows = await this.db.credentials.where('pod').equals(slug).toArray();
+    const tierScoped = (r: CredentialRow) => {
+      const scope = r.raw.credentialSubject?.['authority']?.scope;
+      return scope === undefined || scope === pod?.did || scope === r.issuer;
+    };
     await this.db.credentials.bulkPut(
-      rows.filter((r) => r.kind === 'authority').map((r) => ({ ...r, status: keep.has(r.digest) ? 'active' : 'superseded' }) as CredentialRow),
+      rows
+        .filter((r) => r.kind === 'authority' && tierScoped(r))
+        .map((r) => ({ ...r, status: keep.has(r.digest) ? 'active' : 'superseded' }) as CredentialRow),
     );
   }
 

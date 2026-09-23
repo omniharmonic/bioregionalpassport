@@ -32,7 +32,7 @@ export {
   type VouchScope,
   type WitnessRequest,
 } from './ceremony.js';
-export { signIn, withSession, applyForMembership, acceptMembership, verifyGrant, refreshTier, optInToIndex, commitmentFor, commitSalt } from './membership.js';
+export { signIn, withSession, renewSession, renewAfterNewCredentials, addPodCredential, applyForMembership, acceptMembership, verifyGrant, refreshTier, optInToIndex, commitmentFor, commitSalt } from './membership.js';
 export { exportBackup, importBackup, createShares, recoverFromShares, recoveryStatus, exportCredentialsJson, BACKUP_FORMAT, SHARE_PREFIX } from './recovery.js';
 export { parsePaymentRequest, checkPaymentRequest, buildPayAuthorization, payRequest } from './pay.js';
 export {

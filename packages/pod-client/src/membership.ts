@@ -19,6 +19,39 @@ export async function signIn(wallet: Wallet, client: PodClient, requireAuthority
   return { ...s, visitor: false };
 }
 
+/**
+ * "Refresh my session": presents the passport to the pod again so the session cookie carries every credential
+ * the wallet now holds (new permissions from a grant, a refresh, or an imported credential such as `pay:receive`).
+ * A wallet without a membership pair gets a fresh visitor session.
+ */
+export function renewSession(wallet: Wallet, client: PodClient): Promise<SessionInfo & { visitor: boolean }> {
+  return signIn(wallet, client);
+}
+
+/**
+ * Re-opens the member session after the wallet gained credentials for `client`'s pod, so the cookie carries the
+ * new authorities straight away (issue 6 of the MVP e2e report). Best effort: without a complete membership pair
+ * there is nothing new to present and nothing happens; a failure is returned, never thrown (the credential is
+ * already stored, and the person can press "Refresh my session").
+ */
+export async function renewAfterNewCredentials(wallet: Wallet, client: PodClient): Promise<{ session?: SessionInfo; error?: string }> {
+  if (!(await wallet.membership(client.slug))) return {};
+  try {
+    return { session: await signIn(wallet, client) };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Stores a credential someone handed over (Settings → "Add a credential"), filed under `client`'s pod, then
+ * re-opens the session so a newly added permission works at once.
+ */
+export async function addPodCredential(wallet: Wallet, client: PodClient, vc: VerifiableCredential): Promise<{ digest: string; session?: SessionInfo; error?: string }> {
+  const digest = await wallet.storeCredential(vc, { pod: client.slug });
+  return { digest, ...(await renewAfterNewCredentials(wallet, client)) };
+}
+
 const needsSession = (e: unknown) => e instanceof PodError && (e.code === 'UNAUTHENTICATED' || e.code === 'POD_MISMATCH' || e.code === 'MISSING_AUTHORITY');
 
 /** Runs `fn`; when the pod asks for (another) session, signs in once and retries. */
@@ -94,14 +127,18 @@ export async function acceptMembership(wallet: Wallet, client: PodClient, grant:
   return { member: r.member, vacs: r.vacs, explanation: r.explanation, ...(session ? { session } : {}) };
 }
 
-/** "Why this tier": `POST /authority/refresh` (signing in first when needed); stores the VACs and explanation. */
-export async function refreshTier(wallet: Wallet, client: PodClient): Promise<RefreshResult> {
+/**
+ * "Why this tier": `POST /authority/refresh` (signing in first when needed); stores the VACs and explanation, then
+ * re-opens the session so the cookie carries the refreshed permissions (a new tier's actions work at once).
+ */
+export async function refreshTier(wallet: Wallet, client: PodClient): Promise<RefreshResult & { session?: SessionInfo }> {
   const r = await withSession(wallet, client, () => client.refresh());
   await wallet.replaceVacs(client.slug, r.vacs);
   await wallet.setExplanation(client.slug, { tier: r.tier, explanation: r.explanation, ...(r.next ? { next: r.next } : {}) });
   const until = r.vacs.find((v) => v.credentialSubject?.['tier'] === r.tier)?.validUntil;
   await wallet.setTier(client.slug, r.tier, until);
-  return r;
+  const { session } = await renewAfterNewCredentials(wallet, client);
+  return { ...r, ...(session ? { session } : {}) };
 }
 
 /**

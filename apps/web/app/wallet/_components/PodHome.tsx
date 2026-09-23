@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { Button, Card, EmptyState, Explain, Notice, Pill, TierBadge, type Tier } from '@passport/ui-kit';
-import { eventChannel, recoveryStatus, refreshTier, type ContactRow, type CredentialRow, type EventRow } from '@passport/pod-client';
+import { eventChannel, recoveryStatus, refreshTier, renewSession, type ContactRow, type CredentialRow, type EventRow } from '@passport/pod-client';
 import { copy } from '@passport/tenant-config';
 import { describeRule } from '@/lib/podCopy';
 import { useWalletState } from '../_lib/WalletContext';
@@ -90,6 +90,20 @@ export function PodHome() {
     await w.reload();
   });
 
+  // Fallback for a session that lags behind the wallet (e.g. a permission added elsewhere): present again.
+  const [renewed, setRenewed] = useState<string | null>(null);
+  const renew = useAction(async () => {
+    setRenewed(null);
+    const client = await w.clientFor(pod.slug);
+    const s = await renewSession(w.wallet!, client);
+    setRenewed(
+      s.visitor
+        ? `You presented your passport to ${manifest.identity.name} again as a visitor.`
+        : `You presented your passport to ${manifest.identity.name} again; your session now carries every permission you hold here.`,
+    );
+    await w.reload();
+  });
+
   const tier = (pod.tier ?? 'T0') as Tier;
   const tierName = tierLabel(manifest, tier);
   const exp = pod.lastExplanation;
@@ -130,8 +144,13 @@ export function PodHome() {
           <Button variant="secondary" onClick={() => void why.run()} disabled={why.busy} aria-expanded={showWhy}>
             {why.busy ? 'Asking the pod…' : 'Why this tier'}
           </Button>
+          <Button variant="ghost" onClick={() => void renew.run()} disabled={renew.busy}>
+            {renew.busy ? 'Presenting…' : 'Refresh my session'}
+          </Button>
         </div>
         <ErrorNotice error={why.error} />
+        <ErrorNotice error={renew.error} />
+        {renewed ? <Notice kind="success">{renewed}</Notice> : null}
 
         {showWhy ? (
           member ? (

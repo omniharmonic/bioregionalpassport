@@ -1,12 +1,12 @@
 import 'fake-indexeddb/auto';
-import { createResolver, digestMultibase, isMembershipPairComplete, randomNonce, verifyDocument } from '@passport/credential-core';
+import { buildAuthority, createResolver, digestMultibase, isMembershipPairComplete, randomNonce, verifyDocument } from '@passport/credential-core';
 import { PayAuthorizationMessageSchema } from '@passport/lexicons';
 import { boulderManifest } from '@passport/tenant-config';
 import { tierDefaultActions } from '@passport/vocab';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Ceremony } from './ceremony.js';
 import { PodClient } from './client.js';
-import { acceptMembership, applyForMembership, optInToIndex, refreshTier, signIn } from './membership.js';
+import { acceptMembership, addPodCredential, applyForMembership, optInToIndex, refreshTier, renewSession, signIn } from './membership.js';
 import { buildPayAuthorization } from './pay.js';
 import { PodError } from './util.js';
 import { createWallet, type Wallet } from './wallet.js';
@@ -138,6 +138,30 @@ describe('wallet payloads against the real pod VTA', () => {
     expect(r.next!.missing.length).toBeGreaterThan(0);
     expect(r.next!.hints.every((x) => /[.]$/.test(x))).toBe(true);
     expect((await alice.wallet.pod(SLUG))!.lastExplanation).toMatchObject({ tier: 'T1' });
+    expect(r.session).toMatchObject({ subject: alice.persona.did, tier: 'T1' });
+
+    // A permission handed over later (here `pay:receive` for an enterprise Alice registered) re-opens the session
+    // at once, so the cookie carries it without waiting for a refused call (issue 6 of the MVP e2e report).
+    const enterprise = 'did:key:z6MkenterpriseForSessionRenewalTest';
+    const until = new Date(Date.now() + 30 * 86_400_000).toISOString();
+    const payVac = h.deps.podSigner.sign(
+      buildAuthority({ issuer: POD_DID, subject: alice.persona.did, scope: enterprise, actions: ['pay:receive'], validFrom: new Date().toISOString(), validUntil: until, tier: 'T1' }),
+    );
+    expect(alice.jar.session!.authorities).not.toContain(`pay:receive@${enterprise}`);
+    const added = await addPodCredential(alice.wallet, alice.client, payVac);
+    expect(added.error).toBeUndefined();
+    expect(added.session).toMatchObject({ subject: alice.persona.did, tier: 'T1' });
+    expect(alice.jar.session!.authorities).toContain(`pay:receive@${enterprise}`);
+    // Refreshing the tier replaces only the pod-scoped tier permissions; the enterprise permission stays and the
+    // renewed session still carries it.
+    await refreshTier(alice.wallet, alice.client);
+    expect(await alice.wallet.authorities(SLUG)).toContain('pay:receive');
+    expect(alice.jar.session!.authorities).toContain(`pay:receive@${enterprise}`);
+    // "Refresh my session" after the cookie was lost.
+    delete alice.jar.session;
+    const renewed = await renewSession(alice.wallet, alice.client);
+    expect(renewed).toMatchObject({ visitor: false, tier: 'T1' });
+    expect(alice.jar.session!.authorities).toContain(`pay:receive@${enterprise}`);
 
     // Pay: the authorization the gateway expects (B3 §6), bound to the invoice and signed by the persona.
     const request = {
