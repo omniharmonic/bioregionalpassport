@@ -1,0 +1,58 @@
+/*
+ * @passport/ui-kit theme.css
+ *
+ * Tailwind v4 is CSS-first: this file declares design tokens with `@theme`
+ * so utilities like `bg-primary`, `text-fg`, `bg-bg`, `text-accent` become
+ * available to any app that imports it. The actual colour values are never
+ * hard-coded here — they are read from the `--bp-*` CSS custom properties
+ * that `ThemeProvider` sets at runtime from a pod's manifest. This is what
+ * lets one shared app re-theme per bioregion pod with no code change and no
+ * rebuild: swap the manifest, the CSS variables change, done.
+ *
+ * Apps consume this with:
+ *   @import "@passport/ui-kit/theme.css";
+ */
+
+@import "tailwindcss";
+
+@theme {
+  --color-primary: var(--bp-primary, #1f5f4a);
+  --color-accent: var(--bp-accent, #e4b04a);
+  --color-bg: var(--bp-bg, #fbf8f2);
+  --color-fg: var(--bp-fg, #17201c);
+
+  --font-display: var(--bp-font-display, ui-sans-serif, system-ui, sans-serif);
+  --font-body: var(--bp-font-body, ui-sans-serif, system-ui, sans-serif);
+
+  --radius-2xl: 1.25rem;
+}
+
+:root {
+  /* Fallback defaults so components render sanely before a ThemeProvider
+     has mounted (e.g. during SSR of a page shell, or in Storybook). */
+  --bp-primary: #1f5f4a;
+  --bp-accent: #e4b04a;
+  --bp-bg: #fbf8f2;
+  --bp-fg: #17201c;
+  --bp-font-display: ui-sans-serif, system-ui, sans-serif;
+  --bp-font-body: ui-sans-serif, system-ui, sans-serif;
+}
+
+.bp-theme {
+  background: var(--bp-bg);
+  color: var(--bp-fg);
+  font-family: var(--bp-font-body);
+}
+
+.bp-theme h1,
+.bp-theme h2,
+.bp-theme h3,
+.bp-theme [data-display] {
+  font-family: var(--bp-font-display);
+}
+
+/* Soft, civic base styles: generous whitespace, rounded-2xl cards, soft
+   borders, one accent colour used sparingly. Not a generic SaaS template. */
+.bp-theme ::selection {
+  background: color-mix(in srgb, var(--bp-accent) 35%, transparent);
+}
