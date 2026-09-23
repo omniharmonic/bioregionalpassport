@@ -18,10 +18,10 @@ export function isEndorsementScope(scope: string): boolean {
 }
 
 /**
- * Breadth-first distance from the seed set over the posted adjacency
- * (`from → to`, as posted). A link counts in the direction it was posted: you
- * are reachable when someone already reachable posted a commitment naming you
- * as counterparty. Unreachable DIDs are absent from the result (∞).
+ * Breadth-first distance from the seed set over `index_links` (`endorser →
+ * endorsed`). A link exists only for a verified VEC from a member at T2 or
+ * above that the endorsed member opted in, so you become reachable when someone
+ * already reachable has endorsed you. Unreachable DIDs are absent (∞).
  */
 export function seedDistances(links: Map<string, Set<string>>, seedSet: readonly string[]): Map<string, number> {
   const dist = new Map<string, number>();

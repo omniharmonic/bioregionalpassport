@@ -296,6 +296,9 @@ importers:
 
   services/trust-index:
     dependencies:
+      '@passport/credential-core':
+        specifier: workspace:*
+        version: link:../../packages/credential-core
       '@passport/db':
         specifier: workspace:*
         version: link:../../packages/db

@@ -1,4 +1,5 @@
-import { createTestDb, createTestPod, withPod, type Db } from '@passport/db';
+import { buildEndorsement, createResolver, keyPairFromSeed, signDocument, type KeyPair } from '@passport/credential-core';
+import { createTestDb, createTestPod, pendingMigrations, podSchema, withPod, type Db } from '@passport/db';
 import type { RouteRequest, SessionClaims } from '@passport/service-kit';
 import { ServiceError } from '@passport/service-kit';
 import { defaultTrustPolicy, tenantZeroManifest, type TrustPolicy } from '@passport/tenant-config';
@@ -9,7 +10,31 @@ import { createTrustIndexRoutes, recommendTier, recomputeAll } from './service.j
 import type { IndexContext } from './types.js';
 
 const POD_DID = 'did:web:bioregionalpassport.org:dids:tenant-zero';
-const SEED = 'did:key:zSeed';
+const resolver = createResolver();
+const keys = new Map<string, KeyPair>();
+/** Deterministic did:key persona for `name` (resolves inline, no network). */
+function persona(name: string): KeyPair {
+  let k = keys.get(name);
+  if (!k) {
+    const seed = new Uint8Array(32);
+    for (let i = 0; i < name.length; i++) seed[i % 32] = (seed[i % 32]! + name.charCodeAt(i) * (i + 1)) & 0xff;
+    seed[31] = keys.size + 1;
+    k = keyPairFromSeed(seed);
+    keys.set(name, k);
+  }
+  return k;
+}
+const SEED_KEY = persona('seed');
+const SEED = SEED_KEY.did;
+const E1 = persona('e1');
+const E2 = persona('e2');
+
+/** A signed `dtg:endorses` VEC from `issuer` to `subject`. */
+function vec(issuer: KeyPair, subject: string, scope: 'lives-here' | 'worked-with' | 'knows' = 'knows') {
+  return signDocument(buildEndorsement({ issuer: issuer.did, subject, scope, validFrom: '2026-01-01T00:00:00Z' }), issuer, {
+    created: '2026-01-01T00:00:00Z',
+  });
+}
 const NOW = new Date('2026-09-22T12:00:00Z');
 
 let db: Db;
@@ -29,8 +54,8 @@ interface Pod {
   member(did: string, tier?: string): Promise<void>;
   witness(digest: string, eventId: string, convener: string): Promise<void>;
   post(poster: string, commitments: unknown[], now?: Date): Promise<void>;
-  /** Posts a relationship commitment from `from` naming `to` as counterparty (creates link from → to). */
-  link(from: string, to: string): Promise<void>;
+  /** `to` opts in a VEC from `from` (a T2+ member) ⇒ weighted endorsement + link from → to. */
+  endorse(from: KeyPair, to: string, scope?: 'lives-here' | 'worked-with' | 'knows'): Promise<void>;
 }
 
 async function newPod(): Promise<Pod> {
@@ -54,21 +79,26 @@ async function newPod(): Promise<Pod> {
         await tx.query('INSERT INTO witness_refs (digest, event_id, convener_did) VALUES ($1, $2, $3)', [digest, eventId, convener]);
       }),
     post: async (poster, commitments, now = NOW) => {
-      await pod.run((ctx) => commitEdges(ctx, poster, { commitments }), now);
+      await pod.run((ctx) => commitEdges(ctx, poster, { commitments }, { resolver }), now);
     },
-    link: (from, to) => pod.post(from, [{ commitment: `link-${slug}-${++seq}-commitment`, scope: 'relationship', counterparty: to }]),
+    endorse: (from, to, scope = 'knows') =>
+      pod.post(to, [{ commitment: `endorse-${slug}-${++seq}-commitment`, scope, evidence: { vec: vec(from, to, scope) } }]),
   };
   return pod;
 }
 
-/** Member with 3 witnessed edges across 2 events (2 conveners), 2 weighted endorsements, `hops` from the seed. */
+/**
+ * Member with 3 witnessed edges across 2 events (2 conveners), 2 weighted
+ * endorsements (from T2 members E1, E2), `hops` from the seed. The hop chain is
+ * seed → h1 → … → E2 → member, built only from verified weighted endorsements.
+ */
 async function trustedScenario(hops: number): Promise<{ pod: Pod; m: string }> {
   const pod = await newPod();
-  const m = 'did:key:zMember';
+  const m = persona('member').did;
   await pod.member(SEED, 'T4');
   await pod.member(m, 'T1');
-  await pod.member('did:key:zE1', 'T2');
-  await pod.member('did:key:zE2', 'T2');
+  await pod.member(E1.did, 'T2');
+  await pod.member(E2.did, 'T2');
   await pod.witness('w1', 'event-1', 'did:key:zC1');
   await pod.witness('w2', 'event-1', 'did:key:zC2');
   await pod.witness('w3', 'event-2', 'did:key:zC1');
@@ -76,17 +106,18 @@ async function trustedScenario(hops: number): Promise<{ pod: Pod; m: string }> {
     { commitment: 'commit-w1-aaaaaaaa', scope: 'relationship', witnessRef: 'w1' },
     { commitment: 'commit-w2-aaaaaaaa', scope: 'relationship', witnessRef: 'w2' },
     { commitment: 'commit-w3-aaaaaaaa', scope: 'relationship', witnessRef: 'w3' },
-    { commitment: 'endorse-1-aaaaaaaa', scope: 'lives-here', counterparty: 'did:key:zE1' },
-    { commitment: 'endorse-2-aaaaaaaa', scope: 'knows', counterparty: 'did:key:zE2' },
   ]);
-  // seed → h1 → … → m with exactly `hops` links
-  let prev = SEED;
-  for (let i = 1; i < hops; i++) {
-    const next = `did:key:zHop${i}`;
-    await pod.link(prev, next);
-    prev = next;
+  await pod.endorse(E1, m, 'lives-here');
+  await pod.endorse(E2, m, 'knows');
+  // seed → h1 → … → h(hops-2) → E2 (→ m already linked above)
+  let prev = SEED_KEY;
+  for (let i = 1; i <= hops - 2; i++) {
+    const hop = persona(`hop-${i}`);
+    await pod.member(hop.did, 'T2');
+    await pod.endorse(prev, hop.did);
+    prev = hop;
   }
-  await pod.link(prev, m);
+  await pod.endorse(prev, E2.did);
   return { pod, m };
 }
 
@@ -195,32 +226,42 @@ describe('trust index on PGlite', () => {
     await pod.post('did:key:zNew', [{ commitment: 'new-1-aaaaaaaaaa', scope: 'relationship', witnessRef: 'wn' }]);
     const result = await pod.run((ctx) => recomputeAll(ctx));
     // T2: member; T1: zNew; T4: seed (recorded T4 by governance ⇒ namedInGovernance);
-    // T0: E1, E2 (no edges of their own), hop1, hop2 (posters without membership)
-    expect(result.counts).toEqual({ T0: 4, T1: 1, T2: 1, T3: 0, T4: 1 });
-    expect(result.total).toBe(7);
+    // T0: E1, E2, hop-1 (recorded T2 but no witnessed edges of their own)
+    expect(result.counts).toEqual({ T0: 3, T1: 1, T2: 1, T3: 0, T4: 1 });
+    expect(result.total).toBe(6);
   });
 
-  it('commit stores commitments, witness checks and weighting', async () => {
+  it('the pod migration creates the index tables (no runtime DDL)', async () => {
     const pod = await newPod();
-    await pod.member('did:key:zP', 'T1');
-    await pod.member('did:key:zQ', 'T1');
-    await pod.member('did:key:zT1', 'T1');
+    expect(await pendingMigrations(db, podSchema(pod.slug))).toEqual([]);
+    const tables = await pod.run((ctx) =>
+      ctx.db.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables
+          WHERE table_schema = current_schema() AND table_name IN ('index_postings', 'index_links') ORDER BY table_name`,
+      ),
+    );
+    expect(tables.map((t) => t.table_name)).toEqual(['index_links', 'index_postings']);
+  });
+
+  it('commit stores commitments with witness checks', async () => {
+    const pod = await newPod();
+    const P = 'did:key:zP';
+    await pod.member(P, 'T1');
     await pod.witness('wx', 'event-1', 'did:key:zC1');
     const result = await pod.run((ctx) =>
-      commitEdges(ctx, 'did:key:zP', {
+      commitEdges(ctx, P, {
         commitments: [
-          { commitment: 'edge-x-aaaaaaaa', scope: 'relationship', witnessRef: 'wx', counterparty: 'did:key:zQ' },
+          { commitment: 'edge-x-aaaaaaaa', scope: 'relationship', witnessRef: 'wx' },
           { commitment: 'edge-y-aaaaaaaa', scope: 'relationship', witnessRef: 'missing' },
-          { commitment: 'edge-z-aaaaaaaa', scope: 'knows', counterparty: 'did:key:zT1' },
-          { commitment: 'edge-self-aaaaa', scope: 'knows', counterparty: 'did:key:zP' },
+          { commitment: 'edge-z-aaaaaaaa', scope: 'knows' },
         ],
       }),
     );
-    expect(result).toMatchObject({ accepted: 3, duplicates: 0, rejected: 1 });
-    expect(result.items[0]).toMatchObject({ witnessed: true, linked: true });
+    expect(result).toMatchObject({ accepted: 3, duplicates: 0, rejected: 0 });
+    expect(result.items[0]).toMatchObject({ witnessed: true, linked: false });
     expect(result.items[1]).toMatchObject({ witnessed: false });
     expect(result.items[1]!.note).toMatch(/not found/);
-    expect(result.items[2]).toMatchObject({ weighted: false }); // counterparty only T1
+    expect(result.items[2]).toMatchObject({ weighted: false, linked: false });
 
     // the other party posts the same commitment: allowed; a third claimant is not credited
     await pod.post('did:key:zQ', [{ commitment: 'edge-x-aaaaaaaa', scope: 'relationship', witnessRef: 'wx' }]);
@@ -230,27 +271,105 @@ describe('trust index on PGlite', () => {
     expect(third.items[0]).toMatchObject({ status: 'accepted', witnessed: false });
 
     const dup = await pod.run((ctx) =>
-      commitEdges(ctx, 'did:key:zP', { commitments: [{ commitment: 'edge-x-aaaaaaaa', scope: 'relationship', witnessRef: 'wx' }] }),
+      commitEdges(ctx, P, { commitments: [{ commitment: 'edge-x-aaaaaaaa', scope: 'relationship', witnessRef: 'wx' }] }),
     );
     expect(dup.items[0]).toMatchObject({ status: 'duplicate', witnessed: true });
 
-    const mismatch = await pod.run((ctx) =>
-      commitEdges(ctx, 'did:key:zP', { commitments: [{ commitment: 'edge-x-aaaaaaaa', scope: 'knows' }] }),
-    );
+    const mismatch = await pod.run((ctx) => commitEdges(ctx, P, { commitments: [{ commitment: 'edge-x-aaaaaaaa', scope: 'knows' }] }));
     expect(mismatch.items[0]).toMatchObject({ status: 'rejected' });
 
-    // PEP marks the endorsement weighted after checking vec:issue:weighted
-    expect(await pod.run((ctx) => markWeighted(ctx, 'did:key:zP', ['edge-z-aaaaaaaa']))).toBe(1);
-    const rec = await pod.run((ctx) => recommendTier(ctx, 'did:key:zP'));
+    // PEP marks the endorsement weighted after checking vec:issue:weighted (no link is created)
+    expect(await pod.run((ctx) => markWeighted(ctx, P, ['edge-z-aaaaaaaa']))).toBe(1);
+    const rec = await pod.run((ctx) => recommendTier(ctx, P));
     expect(rec.metrics.weightedEndorsements).toBe(1);
+    expect(await pod.run((ctx) => ctx.db.query('SELECT * FROM index_links'))).toEqual([]);
 
-    await expect(pod.run((ctx) => commitEdges(ctx, 'did:key:zP', { commitments: [] }))).rejects.toMatchObject({
+    await expect(pod.run((ctx) => commitEdges(ctx, P, { commitments: [] }))).rejects.toMatchObject({
       status: 400,
       code: 'INVALID_COMMIT',
     });
     await expect(
-      pod.run((ctx) => commitEdges(ctx, 'did:key:zP', { commitments: [{ commitment: 'edge-q-aaaaaaaa', scope: 'best-friend' }] })),
+      pod.run((ctx) => commitEdges(ctx, P, { commitments: [{ commitment: 'edge-q-aaaaaaaa', scope: 'best-friend' }] })),
     ).rejects.toBeInstanceOf(ServiceError);
+  });
+});
+
+describe('endorsement evidence (VEC)', () => {
+  const M = persona('evidence-member');
+  const links = (pod: Pod) => pod.run((ctx) => ctx.db.query('SELECT from_did, to_did FROM index_links ORDER BY from_did'));
+  const commitWith = (pod: Pod, poster: string, evidence: unknown, commitment = 'vec-commit-aaaaaaaa', scope = 'knows') =>
+    pod.run((ctx) => commitEdges(ctx, poster, { commitments: [{ commitment, scope, evidence }] }, { resolver }));
+
+  it('a bare self-asserted counterparty is impossible: the schema rejects the field', async () => {
+    const pod = await newPod();
+    await pod.member(E1.did, 'T2');
+    await expect(
+      pod.run((ctx) =>
+        commitEdges(ctx, M.did, { commitments: [{ commitment: 'forged-aaaaaaaaa', scope: 'knows', counterparty: E1.did }] }, { resolver }),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: 'INVALID_COMMIT' });
+    expect(await links(pod)).toEqual([]);
+  });
+
+  it('a VEC signed by a real T2 member → weighted + link issuer → poster', async () => {
+    const pod = await newPod();
+    await pod.member(E1.did, 'T2');
+    await pod.member(M.did, 'T1');
+    const result = await commitWith(pod, M.did, { vec: vec(E1, M.did) });
+    expect(result.items[0]).toMatchObject({ status: 'accepted', weighted: true, linked: true });
+    expect(await links(pod)).toEqual([{ from_did: E1.did, to_did: M.did }]);
+    const rec = await pod.run((ctx) => recommendTier(ctx, M.did));
+    expect(rec.metrics.weightedEndorsements).toBe(1);
+  });
+
+  it('a VEC with a tampered proof → 400 BAD_EVIDENCE, nothing stored', async () => {
+    const pod = await newPod();
+    await pod.member(E1.did, 'T2');
+    const good = vec(E1, M.did);
+    const sig = good.proof.proofValue;
+    const tampered = { ...good, proof: { ...good.proof, proofValue: sig.slice(0, -2) + (sig.endsWith('1') ? '22' : '11') } };
+    await expect(commitWith(pod, M.did, { vec: tampered })).rejects.toMatchObject({ status: 400, code: 'BAD_EVIDENCE' });
+    // tampered claim (scope changed after signing) also fails verification
+    const edited = { ...good, credentialSubject: { ...good.credentialSubject, object: { id: M.did, value: { scope: 'lives-here' } } } };
+    await expect(commitWith(pod, M.did, { vec: edited }, 'vec-commit-bbbbbbbb', 'lives-here')).rejects.toMatchObject({
+      status: 400,
+      code: 'BAD_EVIDENCE',
+    });
+    expect(await links(pod)).toEqual([]);
+    expect(await pod.run((ctx) => ctx.db.query('SELECT * FROM index_postings'))).toEqual([]);
+  });
+
+  it('a VEC issued to someone else → 400 "This endorsement was not issued to you."', async () => {
+    const pod = await newPod();
+    await pod.member(E1.did, 'T2');
+    await expect(commitWith(pod, M.did, { vec: vec(E1, 'did:key:zSomeoneElse') })).rejects.toMatchObject({
+      status: 400,
+      code: 'BAD_EVIDENCE',
+      message: 'This endorsement was not issued to you.',
+    });
+    expect(await links(pod)).toEqual([]);
+  });
+
+  it('an issuer who is not a member → not weighted, no link; a T1 issuer → not weighted, no link', async () => {
+    const pod = await newPod();
+    const outsider = persona('outsider');
+    const r1 = await commitWith(pod, M.did, { vec: vec(outsider, M.did) });
+    expect(r1.items[0]).toMatchObject({ status: 'accepted', weighted: false, linked: false });
+    expect(r1.items[0]!.note).toMatch(/not a member/);
+    const t1 = persona('t1-endorser');
+    await pod.member(t1.did, 'T1');
+    const r2 = await commitWith(pod, M.did, { vec: vec(t1, M.did) }, 'vec-commit-cccccccc');
+    expect(r2.items[0]).toMatchObject({ weighted: false, linked: false });
+    expect(await links(pod)).toEqual([]);
+  });
+
+  it('evidence must match the commitment scope and cannot be self-issued', async () => {
+    const pod = await newPod();
+    await pod.member(E1.did, 'T2');
+    await expect(commitWith(pod, M.did, { vec: vec(E1, M.did, 'knows') }, 'vec-commit-dddddddd', 'lives-here')).rejects.toMatchObject({
+      code: 'BAD_EVIDENCE',
+    });
+    await expect(commitWith(pod, M.did, { vec: vec(M, M.did) })).rejects.toMatchObject({ code: 'BAD_EVIDENCE' });
   });
 });
 

@@ -1,5 +1,4 @@
 import { TIERS, type Tier } from '@passport/vocab';
-import { ensureIndexTables } from './schema.js';
 import { isEndorsementScope } from './scorer.js';
 import type { IndexContext, MemberAggregate, TrustGraph } from './types.js';
 
@@ -19,7 +18,6 @@ export interface PostingRow {
 }
 
 export async function loadPostings(ctx: IndexContext): Promise<PostingRow[]> {
-  await ensureIndexTables(ctx.db);
   return ctx.db.query<PostingRow>(
     `SELECT p.poster_did, c.commitment, c.scope, p.witnessed, p.weighted, p.created_at,
             c.witness_ref, w.event_id, w.convener_did

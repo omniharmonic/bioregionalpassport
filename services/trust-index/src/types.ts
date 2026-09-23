@@ -33,7 +33,8 @@ export interface MemberAggregate {
 
 /**
  * The graph a scorer sees: member aggregates plus the opt-in adjacency from
- * `index_links` (`from → to`, directed as posted).
+ * `index_links` (`endorser → endorsed`, one row per opted-in weighted endorsement;
+ * a documented MVP privacy deviation — see migration 0002_trust_index.sql).
  */
 export interface TrustGraph {
   members: Map<string, MemberAggregate>;

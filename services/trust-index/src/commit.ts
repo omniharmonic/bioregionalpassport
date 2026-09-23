@@ -1,8 +1,8 @@
+import { createResolver, verifyDocument, type DidResolver, type VerifiableCredential } from '@passport/credential-core';
 import { IndexCommitmentSchema } from '@passport/lexicons';
 import { ServiceError } from '@passport/service-kit';
-import { isAtLeast, TIERS, type Tier } from '@passport/vocab';
+import { isAtLeast, PREDICATES, TIERS, type Tier } from '@passport/vocab';
 import { z } from 'zod';
-import { ensureIndexTables } from './schema.js';
 import { isEndorsementScope } from './scorer.js';
 import type { IndexContext } from './types.js';
 
@@ -13,10 +13,10 @@ export const COMMIT_SCOPES = ['lives-here', 'worked-with', 'knows', 'relationshi
 export const MAX_WITNESS_CLAIMANTS = 2;
 
 /**
- * `org.bioregion.index.commit` body (B3 §5) with one extension: an optional
- * per-commitment `counterparty` DID. When present the index records a directed
- * link `poster → counterparty` in `index_links`, which is the only input to
- * seed-hop distance. Posting it is an explicit opt-in to reveal that link.
+ * `org.bioregion.index.commit` body (B3 §5) with one extension: optional
+ * per-commitment `evidence.vec`, a signed StatementCredential `dtg:endorses`
+ * issued *to the poster*. Items are strict: unknown fields (e.g. a bare,
+ * unverifiable `counterparty`) are rejected.
  */
 export const CommitBodySchema = z.object({
   commitments: z
@@ -24,13 +24,18 @@ export const CommitBodySchema = z.object({
       IndexCommitmentSchema.extend({
         commitment: z.string().min(8).max(512),
         scope: z.enum(COMMIT_SCOPES),
-        counterparty: z.string().regex(/^did:[a-z0-9]+:.+/, 'counterparty must be a DID').optional(),
-      }),
+        evidence: z.strictObject({ vec: z.record(z.string(), z.unknown()) }).optional(),
+      }).strict(),
     )
     .min(1)
     .max(100),
 });
 export type CommitBody = z.infer<typeof CommitBodySchema>;
+
+export interface CommitDeps {
+  /** Resolves VEC issuer DIDs. Defaults to `createResolver()` (did:key inline, did:web over HTTPS). */
+  resolver?: DidResolver;
+}
 
 export interface CommitItemResult {
   commitment: string;
@@ -52,14 +57,66 @@ function asTier(value: unknown): Tier | null {
   return typeof value === 'string' && (TIERS as readonly string[]).includes(value) ? (value as Tier) : null;
 }
 
+function badEvidence(message: string, hint?: string): ServiceError {
+  return new ServiceError(400, 'BAD_EVIDENCE', message, hint);
+}
+
+/**
+ * Verifies an endorsement VEC offered as evidence and returns its issuer.
+ * Throws 400 `BAD_EVIDENCE` when it is not a valid, current `dtg:endorses`
+ * StatementCredential issued to `poster` for `scope`.
+ */
+async function verifyEndorsementEvidence(
+  vecInput: Record<string, unknown>,
+  poster: string,
+  scope: string,
+  now: Date,
+  resolver: DidResolver,
+): Promise<string> {
+  const vec = vecInput as unknown as VerifiableCredential;
+  const subject = vec.credentialSubject;
+  if (!Array.isArray(vec.type) || !vec.type.includes('StatementCredential') || subject?.['predicate'] !== PREDICATES.endorses) {
+    throw badEvidence('This evidence is not an endorsement credential.');
+  }
+  if (subject.id !== poster) throw badEvidence('This endorsement was not issued to you.');
+  if (typeof vec.issuer !== 'string' || vec.issuer === poster) {
+    throw badEvidence('An endorsement must come from someone other than you.');
+  }
+  const vecScope = (subject['object'] as { value?: { scope?: unknown } } | undefined)?.value?.scope;
+  if (vecScope !== scope) throw badEvidence('This endorsement is for a different scope than the commitment.');
+  if (!vec.proof) throw badEvidence('This endorsement is not signed.');
+  const verified = await verifyDocument(vec as VerifiableCredential & { proof: NonNullable<VerifiableCredential['proof']> }, resolver, {
+    proofPurpose: 'assertionMethod',
+  });
+  if (!verified.ok) throw badEvidence("This endorsement's signature could not be verified.", verified.error);
+  const t = now.getTime();
+  if (vec.validFrom && Date.parse(vec.validFrom) > t) throw badEvidence('This endorsement is not valid yet.');
+  if (vec.validUntil && Date.parse(vec.validUntil) <= t) throw badEvidence('This endorsement has expired.');
+  return vec.issuer;
+}
+
 /**
  * Stores a member's opted-in commitments. `poster` is the session subject.
- * `witnessed` = a witness reference was given, exists in `witness_refs`, and at
- * most two posters claim it. `weighted` (endorsement scopes only) = the named
- * counterparty is a member recorded at T2 or above; the PEP can also set it via
- * `markWeighted` after checking the endorser's `vec:issue:weighted` authority.
+ *
+ * - `witnessed` = a witness reference was given, exists in `witness_refs`, and
+ *   at most two posters claim it.
+ * - `weighted` (endorsement scopes only) = the item carries `evidence.vec`, a
+ *   VEC whose proof verifies, whose subject is the poster, and whose issuer is
+ *   a pod member recorded at T2 or above. The PEP can also set it via
+ *   `markWeighted`.
+ * - Only for such weighted endorsements the index stores one link row
+ *   `issuer → poster` in `index_links` (the seed-hop adjacency). This is a
+ *   documented MVP privacy deviation: beyond salted commitments, the index holds
+ *   two directed DIDs per opted-in weighted endorsement.
+ *
+ * Invalid evidence rejects the whole request (400 `BAD_EVIDENCE`).
  */
-export async function commitEdges(ctx: IndexContext, poster: string, body: unknown): Promise<CommitResult> {
+export async function commitEdges(
+  ctx: IndexContext,
+  poster: string,
+  body: unknown,
+  deps: CommitDeps = {},
+): Promise<CommitResult> {
   const parsed = CommitBodySchema.safeParse(body);
   if (!parsed.success) {
     const first = parsed.error.issues[0];
@@ -70,11 +127,20 @@ export async function commitEdges(ctx: IndexContext, poster: string, body: unkno
       first ? `${first.path.join('.') || '(root)'}: ${first.message}` : undefined,
     );
   }
-  await ensureIndexTables(ctx.db);
   const now = ctx.now();
-  const items: CommitItemResult[] = [];
+  const resolver = deps.resolver ?? createResolver();
 
-  for (const item of parsed.data.commitments) {
+  // Verify all evidence up front so a bad credential rejects the request before anything is written.
+  const issuers = new Map<number, string>();
+  for (const [i, item] of parsed.data.commitments.entries()) {
+    if (!item.evidence) continue;
+    if (!isEndorsementScope(item.scope)) throw badEvidence('Endorsement evidence can only accompany an endorsement scope.');
+    if (item.witnessRef) throw badEvidence('An endorsement commitment cannot also carry a witness reference.');
+    issuers.set(i, await verifyEndorsementEvidence(item.evidence.vec, poster, item.scope, now, resolver));
+  }
+
+  const items: CommitItemResult[] = [];
+  for (const [i, item] of parsed.data.commitments.entries()) {
     const result: CommitItemResult = {
       commitment: item.commitment,
       status: 'accepted',
@@ -83,12 +149,6 @@ export async function commitEdges(ctx: IndexContext, poster: string, body: unkno
       linked: false,
     };
     items.push(result);
-
-    if (item.counterparty === poster) {
-      result.status = 'rejected';
-      result.note = 'A commitment cannot name yourself as the counterparty.';
-      continue;
-    }
 
     const existing = await ctx.db.query<{ scope: string; revoked_at: unknown }>(
       'SELECT scope, revoked_at FROM edge_commitments WHERE commitment = $1',
@@ -137,10 +197,13 @@ export async function commitEdges(ctx: IndexContext, poster: string, body: unkno
       [item.commitment, item.scope, witnessFound, item.witnessRef ?? null, now],
     );
 
+    const issuer = issuers.get(i);
     let weighted = false;
-    if (isEndorsementScope(item.scope) && !claimsWitness && item.counterparty) {
-      const rows = await ctx.db.query<{ tier: string }>('SELECT tier FROM members WHERE did = $1', [item.counterparty]);
+    if (issuer) {
+      const rows = await ctx.db.query<{ tier: string }>('SELECT tier FROM members WHERE did = $1', [issuer]);
       const tier = asTier(rows[0]?.tier);
+      if (!rows[0]) result.note = 'The endorser is not a member of this pod, so this endorsement is not weighted.';
+      else if (tier === null || !isAtLeast(tier, 'T2')) result.note = 'The endorser is below T2, so this endorsement is not weighted.';
       weighted = tier !== null && isAtLeast(tier, 'T2');
     }
 
@@ -164,11 +227,11 @@ export async function commitEdges(ctx: IndexContext, poster: string, body: unkno
       result.weighted = weighted;
     }
 
-    if (item.counterparty) {
+    if (issuer && weighted) {
       await ctx.db.query(
         `INSERT INTO index_links (from_did, to_did, created_at) VALUES ($1, $2, $3)
          ON CONFLICT (from_did, to_did) DO NOTHING`,
-        [poster, item.counterparty, now],
+        [issuer, poster, now],
       );
       result.linked = true;
     }
@@ -185,7 +248,7 @@ export async function commitEdges(ctx: IndexContext, poster: string, body: unkno
 /**
  * PEP hook: marks a member's endorsement postings as weighted (or not) once the
  * PEP has verified the endorser's VEC carried `vec:issue:weighted`.
- * Returns the number of postings updated.
+ * Returns the number of postings updated. Does not create hop links.
  */
 export async function markWeighted(
   ctx: IndexContext,
@@ -193,7 +256,6 @@ export async function markWeighted(
   commitments: readonly string[],
   weighted = true,
 ): Promise<number> {
-  await ensureIndexTables(ctx.db);
   let n = 0;
   for (const commitment of commitments) {
     const rows = await ctx.db.query(

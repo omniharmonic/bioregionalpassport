@@ -1,14 +1,17 @@
 import { requireAuthority, requireSession, type Route } from '@passport/service-kit';
 import { TIERS, type Tier } from '@passport/vocab';
-import { commitEdges } from './commit.js';
+import { commitEdges, type CommitDeps } from './commit.js';
 import { stewardFlags } from './flags.js';
 import { loadGraph } from './graph.js';
 import { metricsFor, recommend, seedDistances, v1Scorer } from './scorer.js';
+import type { DidResolver } from '@passport/credential-core';
 import type { IndexContext, MemberAggregate, Scorer, TierRecommendation } from './types.js';
 
 export interface TrustIndexDeps {
   /** Defaults to the v1 scorer. */
   scorer?: Scorer;
+  /** Resolves endorsement (VEC) issuer DIDs for `POST /commit`. Defaults to `createResolver()`. */
+  resolver?: DidResolver;
 }
 
 function emptyAggregate(did: string): MemberAggregate {
@@ -56,9 +59,13 @@ export async function recomputeAll(ctx: IndexContext, deps: TrustIndexDeps = {})
   return { total: recommendations.size, counts, computedAt: ctx.now().toISOString(), recommendations };
 }
 
+function commitDeps(deps: TrustIndexDeps): CommitDeps {
+  return deps.resolver ? { resolver: deps.resolver } : {};
+}
+
 export function createTrustIndexHandlers(deps: TrustIndexDeps = {}) {
   return {
-    commit: (ctx: IndexContext, poster: string, body: unknown) => commitEdges(ctx, poster, body),
+    commit: (ctx: IndexContext, poster: string, body: unknown) => commitEdges(ctx, poster, body, commitDeps(deps)),
     explanation: (ctx: IndexContext, did: string) => recommendTier(ctx, did, deps),
     flags: (ctx: IndexContext) => stewardFlags(ctx),
     recompute: (ctx: IndexContext) => recomputeAll(ctx, deps),
@@ -75,7 +82,7 @@ export function createTrustIndexRoutes(deps: TrustIndexDeps = {}): Route<IndexCo
       auth: 'member',
       handler: async (ctx, req) => {
         const session = requireSession(req);
-        const result = await commitEdges(ctx, session.subject, req.body);
+        const result = await commitEdges(ctx, session.subject, req.body, commitDeps(deps));
         return { status: result.accepted > 0 ? 201 : 200, body: result };
       },
     },

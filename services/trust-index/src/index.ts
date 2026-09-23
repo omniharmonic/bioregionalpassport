@@ -28,10 +28,10 @@ export {
 export { parseTierRequirement, evaluateRequirement, isGovernanceMetric } from './requirements.js';
 export type { ParsedRequirement, ComparisonOp } from './requirements.js';
 export { CommitBodySchema, COMMIT_SCOPES, MAX_WITNESS_CLAIMANTS, commitEdges, markWeighted } from './commit.js';
-export type { CommitBody, CommitResult, CommitItemResult } from './commit.js';
+export type { CommitBody, CommitDeps, CommitResult, CommitItemResult } from './commit.js';
 export { computeFlags, stewardFlags } from './flags.js';
 export type { AnomalyFlag, AnomalyKind } from './flags.js';
 export { loadGraph } from './graph.js';
-export { TRUST_INDEX_POD_SQL, ensureIndexTables } from './schema.js';
+export { ensureIndexTables } from './schema.js';
 export { recommendTier, recomputeAll, createTrustIndexRoutes, createTrustIndexHandlers } from './service.js';
 export type { TrustIndexDeps, RecomputeResult } from './service.js';

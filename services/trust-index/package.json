@@ -12,13 +12,16 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
+    "@passport/credential-core": "workspace:*",
     "@passport/db": "workspace:*",
     "@passport/lexicons": "workspace:*",
     "@passport/service-kit": "workspace:*",
