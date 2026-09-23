@@ -22,9 +22,9 @@ Residents prove who they are to each other in person, vouch for one another, joi
 | `services/trust-index` | Trust commitments, tier scorer, explanations, anomaly flags |
 | `services/control-plane` | Pod provisioning (idempotent), manifest registry, TRQP-style registry, export, tenant-zero job |
 | `services/appview` | Open records (enterprise/offer/need/event/group/project/place), map/directory/search, schema.org, place resolution |
-| `services/round` *(planned)* | Grants rounds, proposals, quadratic-voting ballots, tally, publication |
-| `services/cc-gateway` *(planned)* | Mutual-credit ledger: accounts, limits, pay/authorize, receipts, steward exposure, disputes, exports |
-| `services/pos-adapter` *(planned)* | Point-of-sale adapter interface + manual-tender adapter + reconcile queue |
+| `services/round` | Grants rounds, proposals, quadratic-voting ballots (personal and group-delegated), verifiable tally, publication |
+| `services/cc-gateway` | Native mutual-credit ledger (ADR-023): accounts, steward-set limits, pay/authorize, receipts, merchant enterprises and staff, steward exposure, disputes, exports |
+| `services/pos-adapter` | Point-of-sale adapter interface with a working manual-tender adapter and a reconcile queue; Square is a follow-up (ADR-028) |
 | `infra/` | Infrastructure notes: Neon, Vercel, DNS, secrets policy — see `infra/README.md` |
 | `docs/` | The build set (product/architecture/protocol/implementation), ADRs, runbooks, `dtg-compat.md`, session plans |
 
@@ -39,7 +39,9 @@ pnpm -r test
 
 cp .env.example .env
 # fill in DATABASE_URL (a Neon or any Postgres connection string), POD_KEY_ENCRYPTION_KEY
-# (64 hex characters), PLATFORM_DOMAIN, SESSION_SECRET
+# (64 hex characters), PLATFORM_DOMAIN, SESSION_SECRET (32+ bytes), and optionally OPERATOR_TOKEN
+# `next dev` reads apps/web/.env.local, not the repo-root .env, so give the web app the same values:
+cp .env apps/web/.env.local        # or: ln -s ../../.env apps/web/.env.local
 
 pnpm passport platform migrate
 pnpm passport bioregion create --manifest boulder
@@ -48,7 +50,7 @@ pnpm passport bioregion create --manifest tenant-zero
 pnpm --filter web dev
 ```
 
-`pnpm passport …` runs `packages/cli`'s `passport` binary against the workspace build. See `docs/runbooks/provision-pod.md` for what each provisioning step does and how to verify a pod, and `docs/runbooks/` generally for operational procedures (key rotation, adding a governance anchor, pod export/exit, bootstrapping a pod's first steward).
+`pnpm passport …` runs `packages/cli`'s `passport` binary against the workspace build (it reads the repo-root `.env`; the web app reads `apps/web/.env.local`). In development, pod hosts are `<slug>.localhost:3000`; the wallet and the wallet-dependent pod sections (grants, credits, merchant) live on the platform origin `localhost:3000` (ADR-032). See `docs/runbooks/provision-pod.md` for what each provisioning step does and how to verify a pod, and `docs/runbooks/` generally for operational procedures (key rotation, adding a governance anchor, pod export/exit, bootstrapping a pod's first steward).
 
 ## Three planes, one new axis
 
@@ -63,7 +65,7 @@ See `docs/build-set/11-passport-technical-architecture.md` §1–2 for the full 
 
 - **Build set** (product, architecture, protocol, implementation) — `docs/build-set/`
 - **MVP session plan** and its deviations from the build set — `docs/plans/2026-09-22-mvp-plan.md`
-- **Architecture decision records** — `docs/adrs/` (ADR 1–20 in the build set; ADR 21–30 recorded here for the MVP)
+- **Architecture decision records** — `docs/adrs/` (ADR 1–20 in the build set; ADR 21–40 recorded here for the MVP)
 - **DTG compatibility log** — `docs/dtg-compat.md`
 - **Runbooks** — `docs/runbooks/`
 - **Infrastructure** (Neon, Vercel, DNS, secrets) — `infra/README.md`
