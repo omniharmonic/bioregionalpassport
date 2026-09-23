@@ -105,7 +105,7 @@ describe('TrustPolicySchema / defaultTrustPolicy', () => {
         T2: {
           requires: [
             'witnessedEdges>=3',
-            'distinctEvents>=2',
+            'distinctEventsOrWitnesses>=2',
             'weightedEndorsements>=2',
             'seedHops<=3',
             'spread>=0.5',
@@ -119,8 +119,42 @@ describe('TrustPolicySchema / defaultTrustPolicy', () => {
       vicRatePerMonth: { T2: 3 },
       idvcRequired: false,
       downgradeAtExpiryOnly: true,
-      anomaly: { endorsementVelocityPerDay: 5, sharedWitnessOnlyFlag: true },
+      admission: { witnessTier: 'T2', peerWitnessing: true },
+      anomaly: {
+        endorsementVelocityPerDay: 5,
+        sharedWitnessOnlyFlag: true,
+        witnessPairsPerWeek: 20,
+        hubMinAdmits: 5,
+      },
     });
+  });
+
+  it('accepts a version-1 policy without admission or the witness anomaly fields, filling defaults', () => {
+    const policy = defaultTrustPolicy('did:web:example.org:dids:x') as any;
+    delete policy.admission;
+    delete policy.anomaly.witnessPairsPerWeek;
+    delete policy.anomaly.hubMinAdmits;
+    const result = validateTrustPolicy(policy);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.policy.admission).toBeUndefined();
+      expect(result.policy.anomaly.witnessPairsPerWeek).toBe(20);
+      expect(result.policy.anomaly.hubMinAdmits).toBe(5);
+    }
+  });
+
+  it('fills admission defaults and validates the witness tier and vouch-only settings', () => {
+    const base = defaultTrustPolicy('did:web:example.org:dids:x');
+    const ok = validateTrustPolicy({ ...base, admission: { vouchOnly: {} } });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.policy.admission).toEqual({ peerWitnessing: true, vouchOnly: { enabled: false, endorsements: 3 } });
+    }
+    const badTier = validateTrustPolicy({ ...base, admission: { witnessTier: 'T5' } });
+    expect(badTier.ok).toBe(false);
+    if (!badTier.ok) expect(badTier.errors.some((e) => e.startsWith('admission.witnessTier'))).toBe(true);
+    const badCount = validateTrustPolicy({ ...base, admission: { vouchOnly: { enabled: true, endorsements: 0 } } });
+    expect(badCount.ok).toBe(false);
   });
 
   it('validates via TrustPolicySchema / validateTrustPolicy', () => {

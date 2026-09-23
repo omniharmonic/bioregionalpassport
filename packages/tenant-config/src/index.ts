@@ -170,6 +170,30 @@ const TierRequirementSchema = z.object({
   requires: z.array(z.string()),
 });
 
+const PolicyTierSchema = z.enum(['T1', 'T2', 'T3', 'T4']);
+
+/**
+ * Admission rules (peer witnessing, Task 21). Optional as a whole: pods
+ * provisioned before it carry policy version 1 without `admission`, and the
+ * services read every field defensively (absent = the defaults below, with no
+ * witness-tier floor).
+ */
+export const AdmissionPolicySchema = z.object({
+  /** Lowest tier (at witness time) whose witness admits a newcomer. T2 also grants `vwc:issue` to T2 members. */
+  witnessTier: PolicyTierSchema.optional(),
+  /** Any Trusted member may witness a relationship on the spot; T2 `distinctEvents>=N` also counts distinct witnesses. */
+  peerWitnessing: z.boolean().default(true),
+  /** Admission by vouches alone (no witnessed meeting); off unless a pod turns it on. */
+  vouchOnly: z
+    .object({
+      enabled: z.boolean().default(false),
+      endorsements: z.number().int().positive().default(3),
+    })
+    .optional(),
+});
+
+export type AdmissionPolicy = z.infer<typeof AdmissionPolicySchema>;
+
 export const TrustPolicySchema = z.object({
   type: z.literal('org.bioregion.trust.policy'),
   pod: z.string(),
@@ -194,9 +218,14 @@ export const TrustPolicySchema = z.object({
   vicRatePerMonth: z.record(z.string(), z.number()),
   idvcRequired: z.boolean(),
   downgradeAtExpiryOnly: z.boolean(),
+  admission: AdmissionPolicySchema.optional(),
   anomaly: z.object({
     endorsementVelocityPerDay: z.number(),
     sharedWitnessOnlyFlag: z.boolean(),
+    /** Review flag when one witness witnesses more pairs than this in 7 days. */
+    witnessPairsPerWeek: z.number().int().positive().default(20),
+    /** Review flag when a witness admitted at least this many people nobody else witnessed. */
+    hubMinAdmits: z.number().int().positive().default(5),
   }),
   proof: DataIntegrityProofSchema.optional(),
 });
@@ -257,7 +286,7 @@ export function defaultTrustPolicy(podDid: string): TrustPolicy {
       T2: {
         requires: [
           'witnessedEdges>=3',
-          'distinctEvents>=2',
+          'distinctEventsOrWitnesses>=2',
           'weightedEndorsements>=2',
           'seedHops<=3',
           'spread>=0.5',
@@ -271,7 +300,13 @@ export function defaultTrustPolicy(podDid: string): TrustPolicy {
     vicRatePerMonth: { T2: 3 },
     idvcRequired: false,
     downgradeAtExpiryOnly: true,
-    anomaly: { endorsementVelocityPerDay: 5, sharedWitnessOnlyFlag: true },
+    admission: { witnessTier: 'T2', peerWitnessing: true },
+    anomaly: {
+      endorsementVelocityPerDay: 5,
+      sharedWitnessOnlyFlag: true,
+      witnessPairsPerWeek: 20,
+      hubMinAdmits: 5,
+    },
   };
 }
 

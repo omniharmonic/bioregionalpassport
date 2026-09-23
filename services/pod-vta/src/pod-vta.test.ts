@@ -48,7 +48,10 @@ const resolver = createResolver({
     [OTHER_POD]: didWebDocument(OTHER_POD, otherKey.publicKeyMultibase),
   },
 });
-const policy: TrustPolicy = defaultTrustPolicy(POD_DID);
+// Most tests pin the pre-21c behaviour: a policy without `admission` (as pods provisioned before Task 21c carry), so
+// T2 does not hold `vwc:issue` and admission has no witness-tier floor. Peer-witnessing tests opt in explicitly.
+const { admission: _defaultAdmission, ...legacyPolicy } = defaultTrustPolicy(POD_DID);
+const policy: TrustPolicy = legacyPolicy;
 
 let db: Db;
 let deps: PodVtaDeps;
@@ -874,9 +877,8 @@ describe('pod VTA — peer witnessing: meetings as Trust Tasks (Task 21a)', () =
   const p3 = generateKeyPair();
   const p4 = generateKeyPair();
   const stewardSession = sessionOf(steward.did, 'T3');
-  // `admission` is not in the TrustPolicy schema yet; the VTA reads it defensively.
-  const pT2 = { ...policy, admission: { witnessTier: 'T2' } } as unknown as TrustPolicy;
-  const pT3 = { ...policy, admission: { witnessTier: 'T3' } } as unknown as TrustPolicy;
+  const pT2: TrustPolicy = { ...policy, admission: { witnessTier: 'T2', peerWitnessing: true } };
+  const pT3: TrustPolicy = { ...policy, admission: { witnessTier: 'T3', peerWitnessing: true } };
   let wSession: SessionClaims;
   let edge12: ReturnType<typeof relationship>;
   let vwc12: VerifiableCredential;
@@ -891,6 +893,11 @@ describe('pod VTA — peer witnessing: meetings as Trust Tasks (Task 21a)', () =
     expect(tierActions(ctxOf(pT2), 'T2')).not.toContain('event:convene');
     expect(tierActions(ctxOf(pT2), 'T1')).not.toContain('vwc:issue');
     expect(tierActions(ctxOf(pT2), 'T3')).toEqual(tierDefaultActions('T3'));
+    // The default policy for new pods (Task 21c) turns peer witnessing on: T2 witnesses, T1 does not.
+    const fresh = defaultTrustPolicy(POD_DID);
+    expect(fresh.admission).toEqual({ witnessTier: 'T2', peerWitnessing: true });
+    expect(tierActions(ctxOf(fresh), 'T2')).toContain('vwc:issue');
+    expect(tierActions(ctxOf(fresh), 'T1')).not.toContain('vwc:issue');
   });
 
   it('a T2 member under a witnessTier T2 policy receives vwc:issue at refresh', async () => {
