@@ -46,29 +46,60 @@ export function requireSessionIn(ctx: PosContext, session: SessionClaims | undef
   return session;
 }
 
-/**
- * Enterprises this session may act for: those it owns (`owner_did`), plus those whose `pay:receive@<did>`
- * authority the session carries (owner or staff via an attenuated VAC) unless the staff grant was revoked.
- */
-export async function merchantScope(ctx: PosContext, session: SessionClaims): Promise<string[]> {
-  const scoped = session.authorities.filter((a) => a.startsWith('pay:receive@')).map((a) => a.slice('pay:receive@'.length));
-  const rows = await ctx.db.query<{ did: string; owner_did: string | null }>(
-    'SELECT did, owner_did FROM enterprises WHERE owner_did = $1 OR did = ANY($2::text[])',
-    [session.subject, scoped],
-  );
-  const revoked = await ctx.db.query<{ enterprise_did: string }>(
-    'SELECT DISTINCT enterprise_did FROM merchant_staff WHERE staff_did = $1 AND revoked_at IS NOT NULL',
-    [session.subject],
-  );
-  const revokedSet = new Set(revoked.map((r) => r.enterprise_did));
-  return rows.filter((r) => r.owner_did === session.subject || !revokedSet.has(r.did)).map((r) => r.did);
+export interface MerchantScopeOptions {
+  /**
+   * Digest of the staff VAC presented with this request. When given, a non-owner counts only through a
+   * `merchant_staff` row with exactly this digest; mutating staff routes always pass it.
+   */
+  staffVacDigest?: string;
 }
 
-export async function requireMerchant(ctx: PosContext, session: SessionClaims, enterpriseDid: string): Promise<void> {
-  const scope = await merchantScope(ctx, session);
-  if (!scope.includes(enterpriseDid)) {
-    throw new ServiceError(403, 'NOT_MERCHANT', 'Only the owner or staff of this enterprise can do this.');
+/**
+ * Enterprises this session may act for (an allow-list):
+ * - enterprises it owns (`owner_did`), and
+ * - enterprises whose `pay:receive@<did>` authority the session carries AND for which the subject has an active
+ *   `merchant_staff` row (`revoked_at IS NULL AND valid_until > now`, and matching `staffVacDigest` when given).
+ * A valid attenuated VAC the owner never registered grants nothing here. Sessions carry no VAC digests, so read-only
+ * routes accept any active row; mutating routes require the staff VAC in the body (digest-matched).
+ */
+export async function merchantScope(ctx: PosContext, session: SessionClaims, opts: MerchantScopeOptions = {}): Promise<string[]> {
+  const scoped = session.authorities.filter((a) => a.startsWith('pay:receive@')).map((a) => a.slice('pay:receive@'.length));
+  const owned = await ctx.db.query<{ did: string }>('SELECT did FROM enterprises WHERE owner_did = $1', [session.subject]);
+  const staffed = scoped.length
+    ? await ctx.db.query<{ enterprise_did: string }>(
+        `SELECT DISTINCT enterprise_did FROM merchant_staff
+          WHERE staff_did = $1 AND enterprise_did = ANY($2::text[]) AND revoked_at IS NULL AND valid_until > $3::timestamptz
+            AND ($4::text IS NULL OR vac_digest = $4::text)`,
+        [session.subject, scoped, ctx.now().toISOString(), opts.staffVacDigest ?? null],
+      )
+    : [];
+  return [...new Set([...owned.map((r) => r.did), ...staffed.map((r) => r.enterprise_did)])];
+}
+
+export async function isOwner(ctx: PosContext, session: SessionClaims, enterpriseDid: string): Promise<boolean> {
+  const rows = await ctx.db.query('SELECT 1 FROM enterprises WHERE did = $1 AND owner_did = $2', [enterpriseDid, session.subject]);
+  return rows.length > 0;
+}
+
+/**
+ * Owner, or active staff. `staffVacDigest` is the digest of the staff VAC sent with a mutating request; for a
+ * non-owner it is required when `requireStaffVac` is set.
+ */
+export async function requireMerchant(
+  ctx: PosContext,
+  session: SessionClaims,
+  enterpriseDid: string,
+  opts: MerchantScopeOptions & { requireStaffVac?: boolean } = {},
+): Promise<'owner' | 'staff'> {
+  if (enterpriseDid && (await isOwner(ctx, session, enterpriseDid))) return 'owner';
+  if (opts.requireStaffVac && !opts.staffVacDigest) {
+    throw new ServiceError(403, 'NOT_MERCHANT', 'Staff need to present their staff authority credential to do this.');
   }
+  const scope = await merchantScope(ctx, session, opts.staffVacDigest ? { staffVacDigest: opts.staffVacDigest } : {});
+  if (!enterpriseDid || !scope.includes(enterpriseDid)) {
+    throw new ServiceError(403, 'NOT_MERCHANT', 'Only the owner or current staff of this enterprise can do this.');
+  }
+  return 'staff';
 }
 
 export interface EntryRow {
@@ -79,6 +110,7 @@ export interface EntryRow {
   unit: string | null;
   invoice: string | null;
   request: unknown;
+  rung_up_by?: string | null;
   authorization: unknown;
   receipt: unknown;
   external_tender: unknown;
@@ -125,6 +157,14 @@ export async function recordTender(ctx: PosContext, entry: EntryRow, tender: Ten
   }
   if (entry.external_tender) {
     throw new ServiceError(409, 'ALREADY_RECORDED', 'The dollar tender for this payment has already been recorded.');
+  }
+  const req = entry.request ? json<Record<string, any>>(entry.request) : null;
+  const saleValue = Number(req?.['totalSale']?.value);
+  if (Number.isFinite(saleValue)) {
+    const due = Math.round((saleValue - num(entry.amount)) * 100) / 100;
+    if (Math.abs(tender.dollars - due) > 0.01) {
+      throw new ServiceError(400, 'TENDER_MISMATCH', `The dollar tender for this sale should be ${due.toFixed(2)} (total sale less the credits paid).`);
+    }
   }
   const adapter = opts.adapter ?? manualAdapter;
   const like: LedgerEntryLike = { id: String(entry.id), invoice: entry.invoice, amount: num(entry.amount), unit: entry.unit, payee: entry.payee_did ?? '' };

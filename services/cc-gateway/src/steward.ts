@@ -3,7 +3,7 @@
  * the four kill criteria (PRD §9), brokerage queue and matches log, exports (CSV, 1099-B totals), disputes.
  */
 import { randomNonce } from '@passport/credential-core';
-import { json, num, toIso } from '@passport/pos-adapter';
+import { json, merchantScope, num, toIso } from '@passport/pos-adapter';
 import { ServiceError, type SessionClaims } from '@passport/service-kit';
 import { bad, DAY_MS, isObject, optString, type GatewayContext } from './util.js';
 
@@ -19,6 +19,17 @@ export const VOLUME_WINDOW_DAYS = 30;
 export const RESPEND_BREACH = 0.35;
 export const RESPEND_WARN = 0.6;
 export const CEILING_HOT = 0.8;
+export const UNMET_BREACH_MIN = 5;
+
+/**
+ * "Unmet demand outpacing matches" (PRD §9): unmatched needs (the brokerage queue) vs logged matches. Warn when
+ * unmatched > matches; breach when unmatched > 2 × matches and there are at least `UNMET_BREACH_MIN` unmatched
+ * needs (so a young pod with two stray needs is not "killed").
+ */
+export function unmetDemandStatus(unmatched: number, matches: number): KillStatus {
+  if (unmatched >= UNMET_BREACH_MIN && unmatched > 2 * matches) return 'breach';
+  return unmatched > matches ? 'warn' : 'ok';
+}
 
 const clip01 = (n: number) => Math.min(1, Math.max(0, n));
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -163,10 +174,11 @@ export async function exposure(ctx: GatewayContext) {
   // unmet demand
   const broker = await brokerageQueue(ctx);
   const matches = (await listMatches(ctx)).length;
+  const unmatched = broker.queue.length;
   killCriteria.push({
     id: 'unmet-demand',
-    status: broker.needs > broker.offers ? 'warn' : 'ok',
-    detail: `${broker.needs} open needs against ${broker.offers} offers; ${broker.queue.length} needs have no matching offer and ${matches} matches are logged.`,
+    status: unmetDemandStatus(unmatched, matches),
+    detail: `${unmatched} needs have no matching offer against ${matches} logged matches (${broker.needs} needs, ${broker.offers} offers in all).`,
   });
   // counsel
   const [counsel] = await ctx.db.query<{ value: unknown }>(`SELECT value FROM steward_flags WHERE key = 'counsel'`);
@@ -183,8 +195,10 @@ export async function exposure(ctx: GatewayContext) {
   return { enterprises, reSpendRatio: respend.ratio, reSpend: respend, volume, killCriteria };
 }
 
-const csvCell = (v: unknown): string => {
-  const s = v === null || v === undefined ? '' : String(v);
+/** CSV cell: formula-injection guard (a leading `= + - @` gets a `'` prefix), then RFC 4180 quoting. */
+export const csvCell = (v: unknown): string => {
+  let s = v === null || v === undefined ? '' : String(v);
+  if (/^[=+\-@]/.test(s)) s = `'${s}`;
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
@@ -242,8 +256,14 @@ export async function fileTransactionDispute(ctx: GatewayContext, s: SessionClai
   const reason = isObject(body) ? optString(body['reason']) : undefined;
   if ((typeof txId !== 'string' && typeof txId !== 'number') || !reason) throw bad('BAD_REQUEST', 'A dispute needs the transaction id and a reason.');
   const id = String(txId);
-  const rows = /^\d+$/.test(id) ? await ctx.db.query('SELECT id FROM ledger_entries WHERE id = $1', [id]) : [];
+  const rows = /^\d+$/.test(id)
+    ? await ctx.db.query<{ payer_did: string | null; payee_did: string | null }>('SELECT payer_did, payee_did FROM ledger_entries WHERE id = $1', [id])
+    : [];
   if (!rows.length) throw new ServiceError(404, 'NOT_FOUND', 'There is no payment with that id in this pod.');
+  const { payer_did, payee_did } = rows[0]!;
+  const scope = await merchantScope(ctx, s);
+  const party = payer_did === s.subject || (!!payer_did && scope.includes(payer_did)) || (!!payee_did && scope.includes(payee_did));
+  if (!party) throw new ServiceError(403, 'NOT_A_PARTY', 'Only the payer or the receiving enterprise can dispute this payment.');
   const disputeId = `dsp_${randomNonce(12)}`;
   const [row] = await ctx.db.query<any>(
     `INSERT INTO disputes (id, subject_digest, filed_by, reason, status, created_at) VALUES ($1, $2, $3, $4, 'open', $5) RETURNING *`,

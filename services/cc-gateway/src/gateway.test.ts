@@ -26,7 +26,7 @@ import { settle } from './ledger.js';
 import { createEnterprise } from './merchant.js';
 import { createGatewayRoutes } from './routes.js';
 import { smokeTransfer } from './smoke.js';
-import { exposure, reSpendRatio } from './steward.js';
+import { csvCell, exposure, reSpendRatio, unmetDemandStatus } from './steward.js';
 import type { GatewayContext, GatewayDeps, GatewayRoute } from './util.js';
 
 const SLUG = 'boulder';
@@ -174,12 +174,12 @@ async function ringUp(totalSale: number, extra: Record<string, unknown> = {}, no
 
 describe('accounts and merchant setup', () => {
   it('opens a member account with the limit of the highest band (idempotent)', async () => {
-    const res = await call('POST', '/accounts/open', { session: sessionOf(customer) });
+    const res = await call('POST', '/accounts/open', { session: sessionOf(customer), body: { credentials: customer.creds } });
     expect(res.status).toBe(201);
     expect(res.body.account).toMatchObject({ did: customer.key.did, kind: 'member', band: 'L1', balance: 0, limit: 100, available: 100 });
-    const again = await call('POST', '/accounts/open', { session: sessionOf(customer) });
+    const again = await call('POST', '/accounts/open', { session: sessionOf(customer), body: { credentials: customer.creds } });
     expect(again.status).toBe(200);
-    const o = await call('POST', '/accounts/open', { session: sessionOf(owner) });
+    const o = await call('POST', '/accounts/open', { session: sessionOf(owner), body: { credentials: owner.creds } });
     expect(o.body.account).toMatchObject({ band: 'L2', limit: 400 });
   });
 
@@ -192,15 +192,15 @@ describe('accounts and merchant setup', () => {
   it('creates an enterprise with rules, account, open record and a root pay:receive VAC', async () => {
     const res = await call('POST', '/merchant/enterprises', {
       session: sessionOf(owner),
-      body: { name: 'Moxie Bread', categories: ['bakery'], acceptanceCategory: 'services', placeId: 'huc12:101900050301', lat: 40.0, lon: -105.2 },
+      body: { credentials: owner.creds, name: 'Moxie Bread', categories: ['bakery'], acceptanceCategory: 'services', placeId: 'huc12:101900050301', lat: 40.0, lon: -105.2 },
     });
     expect(res.status).toBe(201);
     const { enterprise, vac } = res.body;
     enterpriseDid = enterprise.did;
     rootVac = vac;
     expect(enterpriseDid).toMatch(/^did:key:z/);
-    // Enterprise limit = owner's L2 (400) × 3; default ceiling = 80% of that.
-    expect(enterprise.account).toMatchObject({ kind: 'enterprise', limit: 1200, balance: 0 });
+    // Enterprises open with no credit line; default ceiling = 80% × owner's L2 (400) × 3.
+    expect(enterprise.account).toMatchObject({ kind: 'enterprise', limit: 0, balance: 0 });
     expect(enterprise.rules).toMatchObject({ maxShare: 0.75, category: 'services', ceiling: 960, offlineAllowance: 50 });
     expect(vac.issuer).toBe(POD_DID);
     expect(vac.credentialSubject).toMatchObject({ id: owner.key.did, authority: { scope: enterpriseDid, actions: ['pay:receive'] } });
@@ -286,6 +286,9 @@ describe('two-leg payment', () => {
     expect(pending.body.pending.map((p: any) => p.transactionId)).toEqual([paidId]);
     expect(pending.body.pending[0].dollarsDue).toBe(10);
 
+    const wrong = await call('POST', `/pay/${paidId}/tender`, { session: sessionOf(owner), body: { provider: 'square', ref: 'sq_123', dollars: 12 } });
+    expect(wrong.status).toBe(400);
+    expect(wrong.body.code).toBe('TENDER_MISMATCH');
     const tender = await call('POST', `/pay/${paidId}/tender`, { session: sessionOf(owner), body: { provider: 'square', ref: 'sq_123', dollars: 10 } });
     expect(tender.status).toBe(200);
     expect(tender.body.externalTender).toMatchObject({ provider: 'square', adapter: 'manual', ref: 'sq_123', status: 'recorded' });
@@ -331,6 +334,11 @@ describe('two-leg payment', () => {
     expect(stranger.body.code).toBe('PAYER_MISMATCH');
     const wrongChallenge = await call('POST', '/pay/authorize', { session: sessionOf(customer), body: authorization(customer, request, { challenge: 'nope' }) });
     expect(wrongChallenge.body.code).toBe('BAD_CHALLENGE');
+    const badSig = await call('POST', '/pay/authorize', { session: sessionOf(customer), body: authorization(customer, request, { signer: generateKeyPair() }) });
+    expect(badSig.body.code).toBe('BAD_AUTHORIZATION_SIG');
+    const overShare = await ringUp(10, { creditValue: 8 }); // services take at most 75% = 7.5
+    expect(overShare.status).toBe(400);
+    expect(overShare.body.code).toBe('OVER_SHARE');
   });
 
   it('refuses a request without pay:receive for that enterprise', async () => {
@@ -356,8 +364,8 @@ describe('two-leg payment', () => {
   it('lets an owner re-spend enterprise credits through the same authorization', async () => {
     const supplier = persona('T2');
     supplier.creds.length = 3;
-    await call('POST', '/accounts/open', { session: sessionOf(supplier) });
-    const created = await call('POST', '/merchant/enterprises', { session: sessionOf(supplier), body: { name: 'Flour Mill', categories: ['flour'], acceptanceCategory: 'suppliers' } });
+    await call('POST', '/accounts/open', { session: sessionOf(supplier), body: { credentials: supplier.creds } });
+    const created = await call('POST', '/merchant/enterprises', { session: sessionOf(supplier), body: { credentials: supplier.creds, name: 'Flour Mill', categories: ['flour'], acceptanceCategory: 'suppliers' } });
     const mill = created.body.enterprise.did;
     supplier.extra.push(`pay:receive@${mill}`);
     const req = await call('POST', '/pay/request', { session: sessionOf(supplier), body: { enterpriseDid: mill, totalSale: { unit: 'USD', value: 20 } } });
@@ -371,48 +379,123 @@ describe('two-leg payment', () => {
   it('accepts offline payments up to the daily offline allowance', async () => {
     await call('PUT', `/merchant/enterprises/${encodeURIComponent(enterpriseDid)}/rules`, { session: sessionOf(owner), body: { offlineAllowance: 10 } });
     const payer = persona('T2');
-    await call('POST', '/accounts/open', { session: sessionOf(payer) });
-    const first = await ringUp(8); // 6 credits
+    await call('POST', '/accounts/open', { session: sessionOf(payer), body: { credentials: payer.creds } });
+    const notOffered = await ringUp(8);
+    const refusedNotOffered = await call('POST', '/pay/authorize', { session: sessionOf(payer), body: authorization(payer, notOffered.body.request, { offline: true, challenge: 'stored-nonce' }) });
+    expect(refusedNotOffered.body.code).toBe('OFFLINE_NOT_OFFERED');
+    const first = await ringUp(8, { offline: true }); // 6 credits
+    expect(first.body.request.acceptance.offline).toBe(true);
     const ok = await call('POST', '/pay/authorize', { session: sessionOf(payer), body: authorization(payer, first.body.request, { offline: true, challenge: 'stored-nonce' }) });
     expect(ok.status).toBe(200);
-    const second = await ringUp(8);
+    const second = await ringUp(8, { offline: true });
     const refused = await call('POST', '/pay/authorize', { session: sessionOf(payer), body: authorization(payer, second.body.request, { offline: true, challenge: 'stored-nonce' }) });
     expect(refused.body.code).toBe('OFFLINE_ALLOWANCE');
     await call('PUT', `/merchant/enterprises/${encodeURIComponent(enterpriseDid)}/rules`, { session: sessionOf(owner), body: { offlineAllowance: 50 } });
   });
 });
 
+const enc = encodeURIComponent;
+
+/** Owner attenuates their root VAC to a staff member; returns the staff persona, VAC and a verifier-derived session. */
+async function makeStaff(days = 14) {
+  const staff = persona('T1');
+  const staffVac = signDocument(
+    attenuate(rootVac, { issuerKey: owner.key, subject: staff.key.did, actions: ['pay:receive'], validFrom: NOW.toISOString(), validUntil: iso(NOW.getTime() + days * DAY) }),
+    owner.key,
+  );
+  staff.creds.push(rootVac, staffVac);
+  const v = await verifyDTG(
+    createPresentation(staff.creds, staff.key, { challenge: 'c', domain: DOMAIN }),
+    { acceptedPods: [POD_DID], requireAuthority: [`pay:receive@${enterpriseDid}`], challenge: 'c', domain: DOMAIN },
+    { resolver, now: () => NOW },
+  );
+  expect(v.ok).toBe(true);
+  const session: SessionClaims = { subject: staff.key.did, pod: POD_DID, tier: v.tier!, authorities: v.authorities };
+  return { staff, staffVac, session };
+}
+
+const register = (staffVac: VerifiableCredential) =>
+  call('POST', `/merchant/enterprises/${enc(enterpriseDid)}/staff`, { session: sessionOf(owner), body: { vac: staffVac } });
+
 describe('staff', () => {
-  it('validates an owner-attenuated pay:receive VAC and lets staff ring up', async () => {
-    const staff = persona('T1');
-    const validFrom = NOW.toISOString();
-    const staffVac = signDocument(attenuate(rootVac, { issuerKey: owner.key, subject: staff.key.did, actions: ['pay:receive'], validFrom, validUntil: iso(NOW.getTime() + 14 * DAY) }), owner.key);
-    const res = await call('POST', `/merchant/enterprises/${encodeURIComponent(enterpriseDid)}/staff`, { session: sessionOf(owner), body: { staffDid: staff.key.did, vac: staffVac } });
+  it('validates an owner-attenuated pay:receive VAC; staff ring up and read only their own sales', async () => {
+    const { staff, staffVac, session } = await makeStaff();
+    const res = await call('POST', `/merchant/enterprises/${enc(enterpriseDid)}/staff`, { session: sessionOf(owner), body: { staffDid: staff.key.did, vac: staffVac } });
     expect(res.status).toBe(201);
     expect(res.body.staff).toMatchObject({ staffDid: staff.key.did, digest: digestMultibase(staffVac) });
+    expect(session.authorities).toContain(`pay:receive@${enterpriseDid}`);
 
-    // The staff wallet presents root + attenuated VAC; the verifier reports `pay:receive@<enterprise>`.
-    staff.creds.push(rootVac, staffVac);
-    const v = await verifyDTG(createPresentation(staff.creds, staff.key, { challenge: 'c', domain: DOMAIN }), { acceptedPods: [POD_DID], requireAuthority: [`pay:receive@${enterpriseDid}`], challenge: 'c', domain: DOMAIN }, { resolver, now: () => NOW });
-    expect(v.ok).toBe(true);
-    const session: SessionClaims = { subject: staff.key.did, pod: POD_DID, tier: v.tier!, authorities: v.authorities };
-    const req = await call('POST', '/pay/request', { session, body: { enterpriseDid, totalSale: { unit: 'USD', value: 4 } } });
+    // Mutating staff requests must carry the registered staff VAC.
+    const noVac = await call('POST', '/pay/request', { session, body: { enterpriseDid, totalSale: { unit: 'USD', value: 4 } } });
+    expect(noVac.body.code).toBe('NOT_MERCHANT');
+    const req = await call('POST', '/pay/request', { session, body: { enterpriseDid, totalSale: { unit: 'USD', value: 4 }, staffVac } });
     expect(req.status).toBe(201);
     const mine = await call('GET', '/merchant/enterprises/mine', { session });
     expect(mine.body.enterprises[0]).toMatchObject({ did: enterpriseDid, role: 'staff' });
 
-    // Revoked staff can no longer ring up.
-    await call('DELETE', `/merchant/enterprises/${encodeURIComponent(enterpriseDid)}/staff/${encodeURIComponent(staff.key.did)}`, { session: sessionOf(owner) });
-    expect((await call('POST', '/pay/request', { session, body: { enterpriseDid, totalSale: { unit: 'USD', value: 4 } } })).body.code).toBe('NOT_MERCHANT');
+    const paid = await call('POST', '/pay/authorize', { session: sessionOf(customer), body: authorization(customer, req.body.request) });
+    expect(paid.status).toBe(200);
+    const id = paid.body.receipt.transactionId;
+    expect((await call('GET', `/pay/${id}/receipt`, { session })).status).toBe(200);
+    expect((await call('GET', `/pay/${id}/receipt`, { session: sessionOf(owner) })).status).toBe(200);
+    const other = await makeStaff();
+    expect((await register(other.staffVac)).status).toBe(201);
+    expect((await call('GET', `/pay/${id}/receipt`, { session: other.session })).body.code).toBe('NOT_A_PARTY');
+
+    // Staff cannot spend the enterprise's credits.
+    const sale = await ringUp(4);
+    const spend = await call('POST', '/pay/authorize', { session, body: authorization(staff, sale.body.request, { from: enterpriseDid }) });
+    expect(spend.body.code).toBe('PAYER_MISMATCH');
+
+    // Removed staff can no longer ring up or read.
+    await call('DELETE', `/merchant/enterprises/${enc(enterpriseDid)}/staff/${enc(staff.key.did)}`, { session: sessionOf(owner) });
+    expect((await call('POST', '/pay/request', { session, body: { enterpriseDid, totalSale: { unit: 'USD', value: 4 }, staffVac } })).body.code).toBe('NOT_MERCHANT');
+    expect((await call('GET', `/pay/${id}/receipt`, { session })).body.code).toBe('NOT_A_PARTY');
+
+    // Re-adding after removal makes the grant active again.
+    expect((await register(staffVac)).status).toBe(201);
+    expect((await call('POST', '/pay/request', { session, body: { enterpriseDid, totalSale: { unit: 'USD', value: 4 }, staffVac } })).status).toBe(201);
+  });
+
+  it('gives nothing to a valid attenuated VAC the owner never registered, and removes unregistered staff', async () => {
+    const ghost = await makeStaff();
+    const res = await call('POST', '/pay/request', { session: ghost.session, body: { enterpriseDid, totalSale: { unit: 'USD', value: 4 }, staffVac: ghost.staffVac } });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('NOT_MERCHANT');
+    expect((await call('GET', '/merchant/enterprises/mine', { session: ghost.session })).body.enterprises).toEqual([]);
+    const del = await call('DELETE', `/merchant/enterprises/${enc(enterpriseDid)}/staff/${enc(ghost.staff.key.did)}`, { session: sessionOf(owner) });
+    expect(del.status).toBe(200);
+    const rows = await run((ctx) => ctx.db.query('SELECT * FROM merchant_staff WHERE staff_did = $1', [ghost.staff.key.did]));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].revoked_at).not.toBeNull();
+  });
+
+  it('refuses staff authority longer than 30 days', async () => {
+    const staff = persona('T1');
+    const tooLong = signDocument(
+      buildAuthority({
+        issuer: owner.key.did,
+        subject: staff.key.did,
+        scope: enterpriseDid,
+        actions: ['pay:receive'],
+        validFrom: NOW.toISOString(),
+        validUntil: iso(NOW.getTime() + 45 * DAY),
+        parent: digestMultibase(rootVac),
+        depth: 1,
+        bioregionScope: 'directed',
+      }),
+      owner.key,
+    );
+    expect((await register(tooLong)).body.code).toBe('TOO_LONG');
   });
 
   it('refuses a staff VAC not derived from the owner root, or signed by someone else', async () => {
     const staff = persona('T1');
     const stray = podSigner.sign(buildAuthority({ issuer: POD_DID, subject: owner.key.did, scope: enterpriseDid, actions: ['pay:receive'], validFrom: NOW.toISOString(), validUntil: iso(NOW.getTime() + 20 * DAY) }));
     const fromStray = signDocument(attenuate(stray, { issuerKey: owner.key, subject: staff.key.did, actions: ['pay:receive'], validFrom: NOW.toISOString(), validUntil: iso(NOW.getTime() + 7 * DAY) }), owner.key);
-    const bad = await call('POST', `/merchant/enterprises/${encodeURIComponent(enterpriseDid)}/staff`, { session: sessionOf(owner), body: { vac: fromStray } });
+    const bad = await call('POST', `/merchant/enterprises/${enc(enterpriseDid)}/staff`, { session: sessionOf(owner), body: { vac: fromStray } });
     expect(bad.body.code).toBe('BAD_CHAIN');
-    const notOwner = await call('POST', `/merchant/enterprises/${encodeURIComponent(enterpriseDid)}/staff`, { session: sessionOf(customer), body: { vac: fromStray } });
+    const notOwner = await call('POST', `/merchant/enterprises/${enc(enterpriseDid)}/staff`, { session: sessionOf(customer), body: { vac: fromStray } });
     expect(notOwner.body.code).toBe('NOT_OWNER');
   });
 });
@@ -422,7 +505,7 @@ describe('steward', () => {
     await run(async (ctx) => {
       const s = persona('T2');
       const sess = sessionOf(s);
-      const { enterprise } = await createEnterprise(ctx, deps, sess, { name: 'Re-spend Co', categories: ['x'], acceptanceCategory: 'services' });
+      const { enterprise } = await createEnterprise(ctx, deps, sess, { credentials: s.creds, name: 'Re-spend Co', categories: ['x'], acceptanceCategory: 'services' });
       const a = generateKeyPair().did;
       const b = generateKeyPair().did;
       await ctx.db.query(`INSERT INTO accounts (did, kind, limit_band, credit_limit) VALUES ($1, 'member', 'L3', 1000), ($2, 'member', 'L3', 1000)`, [a, b]);
@@ -436,7 +519,10 @@ describe('steward', () => {
 
   it('reports kill-criteria statuses', async () => {
     await run(async (ctx) => {
-      const mk = async (name: string) => (await createEnterprise(ctx, deps, sessionOf(persona('T1')), { name, categories: ['x'], acceptanceCategory: 'retail', ceiling: 100 })).enterprise.did;
+      const mk = async (name: string) => {
+        const p = persona('T1');
+        return (await createEnterprise(ctx, deps, sessionOf(p), { credentials: p.creds, name, categories: ['x'], acceptanceCategory: 'retail', ceiling: 100 })).enterprise.did;
+      };
       const e1 = await mk('One');
       const e2 = await mk('Two');
       await mk('Three');
@@ -495,7 +581,7 @@ describe('steward', () => {
 
     const totals = await call('GET', '/exports/1099b.json', { session: stewardSession });
     expect(totals.body.year).toBe(2026);
-    expect(totals.body.enterprises.find((e: any) => e.did === enterpriseDid)).toMatchObject({ name: 'Moxie Bread', totalReceived: 36, count: 2 });
+    expect(totals.body.enterprises.find((e: any) => e.did === enterpriseDid)).toMatchObject({ name: 'Moxie Bread', totalReceived: 39, count: 3 }); // 30 + 6 offline + 3 rung up by staff
   });
 
   it('files a dispute against a transaction', async () => {
@@ -505,6 +591,9 @@ describe('steward', () => {
     expect(res.body).toMatchObject({ transactionId: String(id), status: 'open' });
     const [row] = await run((ctx) => ctx.db.query('SELECT * FROM disputes WHERE id = $1', [res.body.id]));
     expect(row.subject_digest).toBe(String(id));
+    const stranger = await call('POST', '/disputes', { session: sessionOf(persona('T1')), body: { transactionId: String(id), reason: 'Not mine' } });
+    expect(stranger.body.code).toBe('NOT_A_PARTY');
+    expect((await call('POST', '/disputes', { session: sessionOf(owner), body: { transactionId: String(id), reason: 'Refund owed' } })).status).toBe(201);
   });
 });
 
@@ -535,10 +624,126 @@ describe('pos-adapter routes', () => {
     const pending = await call('GET', '/reconcile/pending', { session: sessionOf(owner), table: posRoutes });
     expect(pending.body.pending.length).toBeGreaterThan(0);
     const id = pending.body.pending[0].transactionId;
-    const res = await call('POST', '/tender/record', { session: sessionOf(owner), table: posRoutes, body: { transactionId: id, provider: 'manual', dollars: 2 } });
+    const res = await call('POST', '/tender/record', { session: sessionOf(owner), table: posRoutes, body: { transactionId: id, provider: 'manual', dollars: pending.body.pending[0].dollarsDue } });
     expect(res.status).toBe(200);
     expect(res.body.externalTender).toMatchObject({ provider: 'manual', ref: `manual-${id}`, status: 'recorded' });
     const stranger = await call('POST', '/tender/record', { session: sessionOf(customer), table: posRoutes, body: { transactionId: id, provider: 'manual', dollars: 2 } });
     expect(stranger.body.code).toBe('NOT_MERCHANT');
+  });
+});
+
+describe('enterprise credit lines (fix round 1)', () => {
+  it('opens enterprises with no credit line, so shell enterprises add no borrowing power', async () => {
+    const shellOwner = persona('T1');
+    await call('POST', '/accounts/open', { session: sessionOf(shellOwner), body: { credentials: shellOwner.creds } });
+    const shells: string[] = [];
+    for (const name of ['Shell A', 'Shell B', 'Shell C']) {
+      const r = await call('POST', '/merchant/enterprises', { session: sessionOf(shellOwner), body: { credentials: shellOwner.creds, name, categories: ['x'], acceptanceCategory: 'services' } });
+      expect(r.body.enterprise.account.limit).toBe(0);
+      shells.push(r.body.enterprise.did);
+    }
+    const requests = [];
+    for (const shell of shells) {
+      const sale = await ringUp(8); // 6 credits to Moxie
+      requests.push(sale.body.request);
+      const res = await call('POST', '/pay/authorize', { session: sessionOf(shellOwner), body: authorization(shellOwner, sale.body.request, { from: shell }) });
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ code: 'OVER_LIMIT', message: 'This payment would take you 6 credits past your limit of 0.' });
+    }
+
+    // A steward may grant an explicit enterprise limit, logged with who and why.
+    const noAuth = await call('PUT', `/steward/enterprises/${enc(shells[0]!)}/limit`, { session: sessionOf(shellOwner), body: { creditLimit: 10, reason: 'x' } });
+    expect(noAuth.status).toBe(403);
+    const set = await call('PUT', `/steward/enterprises/${enc(shells[0]!)}/limit`, { session: stewardSession, body: { creditLimit: 10, reason: 'Seed stock for the co-op launch' } });
+    expect(set.body.limit).toMatchObject({ creditLimit: 10, reason: 'Seed stock for the co-op launch', by: stewardSession.subject });
+    const [flag] = await run((ctx) => ctx.db.query('SELECT value FROM steward_flags WHERE key = $1', [`limit:${shells[0]}`]));
+    expect(flag.value).toMatchObject({ creditLimit: 10 });
+    const ok = await call('POST', '/pay/authorize', { session: sessionOf(shellOwner), body: authorization(shellOwner, requests[0], { from: shells[0] }) });
+    expect(ok.status).toBe(200);
+    expect(await balanceOf(shells[0]!)).toBe(-6);
+  });
+});
+
+describe('root VACs only (fix round 1)', () => {
+  const elder = persona('T3');
+  const elderRoot = elder.creds[2]!;
+  const forward = (to: KeyPair, actions: string[]) =>
+    signDocument(attenuate(elderRoot, { issuerKey: elder.key, subject: to.did, actions, validFrom: NOW.toISOString(), validUntil: iso(NOW.getTime() + 10 * DAY) }), elder.key);
+
+  it('does not let a forwarded credit:limit:L3 raise a limit', async () => {
+    const junior = persona('T1');
+    junior.creds.push(elderRoot, forward(junior.key, ['credit:limit:L3', 'credit:account']));
+    const opened = await call('POST', '/accounts/open', { session: { ...sessionOf(junior), authorities: [...tierDefaultActions('T1'), 'credit:limit:L3'] }, body: { credentials: junior.creds } });
+    expect(opened.body.account).toMatchObject({ band: 'L1', limit: 100 });
+    const sale = await ringUp(8);
+    // The verifier may refuse the forwarded credential outright; either way the limit must not move.
+    await call('POST', '/pay/authorize', { session: sessionOf(junior), body: authorization(junior, sale.body.request) });
+    const [acct] = await run((ctx) => ctx.db.query('SELECT limit_band, credit_limit FROM accounts WHERE did = $1', [junior.key.did]));
+    expect(acct).toMatchObject({ limit_band: 'L1' });
+    expect(Number(acct.credit_limit)).toBe(100);
+  });
+
+  it('does not let a forwarded credit:account open an account or an enterprise', async () => {
+    const outsider = persona('T1');
+    const creds = [outsider.creds[0]!, outsider.creds[1]!, elderRoot, forward(outsider.key, ['credit:account'])];
+    const session: SessionClaims = { subject: outsider.key.did, pod: POD_DID, tier: 'T0', authorities: ['credit:account'] };
+    const res = await call('POST', '/accounts/open', { session, body: { credentials: creds } });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('MISSING_AUTHORITY');
+    const ent = await call('POST', '/merchant/enterprises', { session: { ...session, tier: 'T1' }, body: { credentials: creds, name: 'Nope', categories: ['x'], acceptanceCategory: 'retail' } });
+    expect(ent.body.code).toBe('MISSING_AUTHORITY');
+    // A root VAC with a forged pod signature does not count either.
+    const forged = signDocument(buildAuthority({ issuer: POD_DID, subject: outsider.key.did, scope: POD_DID, actions: ['credit:account'], validFrom: NOW.toISOString(), validUntil: iso(NOW.getTime() + 10 * DAY) }), outsider.key);
+    expect((await call('POST', '/accounts/open', { session, body: { credentials: [forged] } })).body.code).toBe('MISSING_AUTHORITY');
+  });
+});
+
+describe('kill criteria and exports (fix round 1)', () => {
+  it('unmet demand compares unmatched needs with matches and can breach', async () => {
+    expect(unmetDemandStatus(0, 0)).toBe('ok');
+    expect(unmetDemandStatus(1, 1)).toBe('ok');
+    expect(unmetDemandStatus(3, 1)).toBe('warn');
+    expect(unmetDemandStatus(4, 0)).toBe('warn');
+    expect(unmetDemandStatus(5, 2)).toBe('breach');
+    expect(unmetDemandStatus(5, 3)).toBe('warn');
+    await run(
+      (ctx) =>
+        ctx.db.query(
+          `INSERT INTO offers (id, kind, record) VALUES
+             ('n3','need','{"resourceSpec":"plumbing"}'), ('n4','need','{"resourceSpec":"roofing"}'), ('n5','need','{"resourceSpec":"tutoring"}'),
+             ('n6','need','{"resourceSpec":"firewood"}'), ('n7','need','{"resourceSpec":"sewing"}')`,
+        ),
+      NOW,
+      'kills',
+    );
+    const res = await call('GET', '/steward/exposure', { session: stewardSession, slug: 'kills' });
+    const unmet = res.body.killCriteria.find((k: any) => k.id === 'unmet-demand');
+    expect(unmet.status).toBe('breach');
+    expect(unmet.detail).toMatch(/^5 needs have no matching offer against 1 logged matches/);
+  });
+
+  it('guards CSV cells against formula injection and quotes them', async () => {
+    expect(csvCell('=SUM(A1)')).toBe("'=SUM(A1)");
+    expect(csvCell('+1')).toBe("'+1");
+    expect(csvCell('-2')).toBe("'-2");
+    expect(csvCell('@x')).toBe("'@x");
+    expect(csvCell('a,"b"')).toBe('"a,""b"""');
+    const sale = await ringUp(8, { invoice: '=HYPERLINK("x")' });
+    expect((await call('POST', '/pay/authorize', { session: sessionOf(customer), body: authorization(customer, sale.body.request) })).status).toBe(200);
+    const csv = (await call('GET', '/exports/transactions.csv', { session: stewardSession })).body as string;
+    expect(csv).toContain(`"'=HYPERLINK(""x"")"`);
+    expect(csv).not.toMatch(/,=HYPERLINK/);
+  });
+
+  it('stores W-9 status privately on the enterprise', async () => {
+    const res = await call('PUT', `/merchant/enterprises/${enc(enterpriseDid)}/rules`, { session: sessionOf(owner), body: { w9: { onFile: true, capturedAt: '2026-09-01' } } });
+    expect(res.body.w9).toEqual({ onFile: true, capturedAt: '2026-09-01T00:00:00.000Z' });
+    await call('PUT', `/merchant/enterprises/${enc(enterpriseDid)}/rules`, { session: sessionOf(owner), body: { maxShare: 0.7 } });
+    const mine = await call('GET', '/merchant/enterprises/mine', { session: sessionOf(owner) });
+    expect(mine.body.enterprises.find((e: any) => e.did === enterpriseDid).w9).toEqual({ onFile: true, capturedAt: '2026-09-01T00:00:00.000Z' });
+    const [rec] = await run((ctx) => ctx.db.query(`SELECT record FROM records WHERE collection = 'enterprise' AND record->>'did' = $1`, [enterpriseDid]));
+    expect(rec.record.w9).toBeUndefined();
+    expect(rec.record.acceptanceShare).toBe(0.7);
+    expect((await call('PUT', `/merchant/enterprises/${enc(enterpriseDid)}/rules`, { session: sessionOf(owner), body: { w9: { onFile: 'yes' } } })).body.code).toBe('BAD_REQUEST');
   });
 });

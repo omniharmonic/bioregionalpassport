@@ -4,16 +4,67 @@
  * negative limit comes from the highest `credit:limit:Ln` authority they hold × `manifest.currency.limits`.
  * Credit is never bought or sold: there is no route that creates balance except a transfer between accounts.
  */
+import { verifyDocument, type DataIntegrityProof, type VerifiableCredential } from '@passport/credential-core';
 import { json, num, toIso } from '@passport/pos-adapter';
 import { ServiceError } from '@passport/service-kit';
-import { bad, cents, fmt, type GatewayContext } from './util.js';
+import { bad, cents, fmt, isObject, type GatewayContext, type GatewayDeps } from './util.js';
 
 export const LIMIT_BANDS = ['L1', 'L2', 'L3'] as const;
 export type LimitBand = (typeof LIMIT_BANDS)[number];
 
-/** Enterprise accounts get the owner's band limit × this factor (and a default ceiling of 80% of that). */
+/**
+ * Default acceptance ceiling of an enterprise = owner's band limit × this factor × `DEFAULT_CEILING_SHARE`.
+ * The ceiling bounds what an enterprise may *hold*; it is not a credit line. Enterprise accounts open with
+ * `credit_limit = 0` (they spend only what they earned); a steward may set an explicit enterprise limit.
+ */
 export const ENTERPRISE_LIMIT_FACTOR = 3;
 export const DEFAULT_CEILING_SHARE = 0.8;
+
+/**
+ * Pod-scoped actions `subject` holds through its OWN root VACs among `creds`: AuthorityCredentials with no
+ * `authority.parent`, `issuer === ctx.podDid`, `credentialSubject.id === subject`, `authority.scope === ctx.podDid`,
+ * inside their validity window. Forwarded (attenuated) VACs never count, so a `credit:limit:L3` or `credit:account`
+ * passed on by someone else cannot raise a limit or open an account. Signatures are NOT checked here: callers pass
+ * credentials already verified (by `verifyDTG`) or use `verifiedRootActions`.
+ */
+export function rootPodActions(ctx: GatewayContext, creds: unknown, subject: string): Set<string> {
+  const out = new Set<string>();
+  const now = ctx.now().getTime();
+  for (const vc of Array.isArray(creds) ? creds : []) {
+    if (!isObject(vc) || !Array.isArray(vc['type']) || !vc['type'].includes('AuthorityCredential')) continue;
+    const cs = vc['credentialSubject'];
+    const a = isObject(cs) ? cs['authority'] : undefined;
+    if (vc['issuer'] !== ctx.podDid || !isObject(cs) || cs['id'] !== subject || !isObject(a)) continue;
+    if (a['parent'] !== undefined || a['scope'] !== ctx.podDid || !Array.isArray(a['actions'])) continue;
+    const from = Date.parse(String(vc['validFrom']));
+    const until = Date.parse(String(vc['validUntil']));
+    if (!(from <= now) || !(until > now)) continue;
+    for (const act of a['actions']) if (typeof act === 'string') out.add(act);
+  }
+  return out;
+}
+
+/**
+ * For routes without a presentation proof (`/accounts/open`, `/merchant/enterprises`): the body carries the
+ * holder's credentials (`{ credentials }` or `{ presentation }`); each candidate root VAC must carry a valid pod
+ * signature. The session already authenticates the subject.
+ */
+export async function verifiedRootActions(ctx: GatewayContext, deps: Pick<GatewayDeps, 'resolver'>, body: unknown, subject: string): Promise<Set<string>> {
+  const raw = isObject(body) ? (body['credentials'] ?? (isObject(body['presentation']) ? body['presentation']['verifiableCredential'] : undefined)) : undefined;
+  const candidates = (Array.isArray(raw) ? raw : []).filter((vc) => rootPodActions(ctx, [vc], subject).size > 0);
+  const verified: VerifiableCredential[] = [];
+  for (const vc of candidates) {
+    const r = await verifyDocument(vc as { proof: DataIntegrityProof }, deps.resolver, { proofPurpose: 'assertionMethod' });
+    if (r.ok && r.controller === ctx.podDid) verified.push(vc as VerifiableCredential);
+  }
+  return rootPodActions(ctx, verified, subject);
+}
+
+export function requireRootAction(actions: Set<string>, action: string): void {
+  if (!actions.has(action)) {
+    throw new ServiceError(403, 'MISSING_AUTHORITY', `This needs your own "${action}" authority from this pod; a passed-on credential does not count.`);
+  }
+}
 
 /** Highest `credit:limit:Ln` in a session's (pod-scoped) authorities; L1 when none is carried. */
 export function highestBand(authorities: readonly string[]): LimitBand {
@@ -79,15 +130,17 @@ export async function openAccount(
   return { account: (await getAccount(ctx, p.did))!, created: false };
 }
 
-/** `POST /accounts/open`: a member account with the limit of the highest band the session carries. */
-export async function openMemberAccount(ctx: GatewayContext, subject: string, authorities: readonly string[]) {
-  const band = highestBand(authorities);
+/** `POST /accounts/open`: a member account with the limit of the highest band among the member's own root VACs. */
+export async function openMemberAccount(ctx: GatewayContext, subject: string, rootActions: Set<string>) {
+  requireRootAction(rootActions, 'credit:account');
+  const band = highestBand([...rootActions]);
   const { account, created } = await openAccount(ctx, { did: subject, kind: 'member', band, limit: ctx.manifest.currency.limits[band] });
   return { account: accountView(ctx, account), created };
 }
 
 /**
- * Raises (never lowers) a member account's band when a verified presentation shows a higher `credit:limit:Ln`.
+ * Raises (never lowers) a member account's band when the member's own root VACs (see `rootPodActions`) in a
+ * verified presentation show a higher `credit:limit:Ln`.
  * A lower band later (e.g. an expired VAC) leaves the limit alone; stewards adjust limits by hand.
  */
 export async function raiseBand(ctx: GatewayContext, did: string, authorities: readonly string[]): Promise<void> {

@@ -16,6 +16,9 @@ export {
   getAccount,
   accountView,
   raiseBand,
+  rootPodActions,
+  verifiedRootActions,
+  requireRootAction,
   settle,
   statement,
   type LimitBand,
@@ -30,6 +33,7 @@ export {
   STAFF_MAX_DAYS,
   createEnterprise,
   updateRules,
+  setEnterpriseLimit,
   addStaff,
   revokeStaff,
   addCommitment,
@@ -39,11 +43,14 @@ export {
   type Rules,
   type AcceptanceCategory,
 } from './merchant.js';
-export { REQUEST_TTL_MS, OFFLINE_SYNC_WINDOW_MS, podDomain, createPayRequest, authorizePayment, getReceipt } from './pay.js';
+export { REQUEST_TTL_MS, OFFLINE_SYNC_WINDOW_MS, podDomain, createPayRequest, authorizePayment, getReceipt, staffVacDigestOf } from './pay.js';
 export {
   RESPEND_BREACH,
   RESPEND_WARN,
   CEILING_HOT,
+  UNMET_BREACH_MIN,
+  unmetDemandStatus,
+  csvCell,
   CSV_HEADER,
   reSpendRatio,
   exposure,

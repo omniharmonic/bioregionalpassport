@@ -1,8 +1,8 @@
 import { manualAdapter, merchantScope, parseTender, pendingReconciliation, recordTender, requireMerchant } from '@passport/pos-adapter';
 import { ServiceError } from '@passport/service-kit';
-import { getAccount, accountView, openMemberAccount, statement } from './ledger.js';
-import { addCommitment, addStaff, createEnterprise, listMine, revokeStaff, updateRules } from './merchant.js';
-import { authorizePayment, createPayRequest, getReceipt, loadEntry } from './pay.js';
+import { getAccount, accountView, openMemberAccount, statement, verifiedRootActions } from './ledger.js';
+import { addCommitment, addStaff, createEnterprise, listMine, revokeStaff, setEnterpriseLimit, updateRules } from './merchant.js';
+import { authorizePayment, createPayRequest, getReceipt, loadEntry, staffVacDigestOf } from './pay.js';
 import {
   brokerageQueue,
   exposure,
@@ -30,7 +30,9 @@ export function createGatewayRoutes(deps: GatewayDeps): GatewayRoute[] {
       auth: 'authority:credit:account',
       handler: async (ctx, req) => {
         const s = requireAuthorityIn(ctx, req, 'credit:account');
-        const { account, created } = await openMemberAccount(ctx, s.subject, s.authorities);
+        // `credit:account` and the band come from the member's own root VACs sent in the body, not the session.
+        const roots = await verifiedRootActions(ctx, deps, req.body, s.subject);
+        const { account, created } = await openMemberAccount(ctx, s.subject, roots);
         return { status: created ? 201 : 200, body: { account } };
       },
     },
@@ -125,7 +127,8 @@ export function createGatewayRoutes(deps: GatewayDeps): GatewayRoute[] {
       handler: async (ctx, req) => {
         const s = requireMember(ctx, req);
         const entry = await loadEntry(ctx, req.params['id'] ?? '');
-        await requireMerchant(ctx, s, entry.payee_did ?? '');
+        const digest = staffVacDigestOf(req.body);
+        await requireMerchant(ctx, s, entry.payee_did ?? '', { requireStaffVac: true, ...(digest ? { staffVacDigest: digest } : {}) });
         const tender = parseTender(req.body);
         return { body: await recordTender(ctx, entry, tender, { adapter, signer: deps.podSigner }) };
       },
@@ -157,6 +160,12 @@ export function createGatewayRoutes(deps: GatewayDeps): GatewayRoute[] {
         requireAuthorityIn(ctx, req, 'pep:review');
         return { body: await exposure(ctx) };
       },
+    },
+    {
+      method: 'PUT',
+      path: '/steward/enterprises/:did/limit',
+      auth: STEWARD,
+      handler: async (ctx, req) => ({ body: await setEnterpriseLimit(ctx, requireAuthorityIn(ctx, req, 'pep:review'), req.params['did'] ?? '', req.body) }),
     },
     {
       method: 'GET',

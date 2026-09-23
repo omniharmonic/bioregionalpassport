@@ -6,15 +6,15 @@
  */
 import { digestMultibase, verifyDocument, type DataIntegrityProof, type VerifiablePresentation } from '@passport/credential-core';
 import { PayAuthorizationMessageSchema, type PayRequestMessage } from '@passport/lexicons';
-import { findEntry, json, merchantScope, num, sealMessage, toIso, type EntryRow } from '@passport/pos-adapter';
+import { findEntry, isOwner, json, merchantScope, num, requireMerchant, sealMessage, toIso, type EntryRow } from '@passport/pos-adapter';
 import { ServiceError, type SessionClaims } from '@passport/service-kit';
 import { verifyDTG } from '@passport/verifier-sdk';
-import { getAccount, overLimitError, raiseBand, settle, type AccountRow } from './ledger.js';
+import { getAccount, overLimitError, raiseBand, requireRootAction, rootPodActions, settle, type AccountRow } from './ledger.js';
 import { getEnterprise, getRules } from './merchant.js';
 import { addMs, bad, cents, DAY_MS, floorCents, isObject, optString, tid, type GatewayContext, type GatewayDeps } from './util.js';
 
 export const REQUEST_TTL_MS = 10 * 60_000;
-/** An offline authorization may be synced up to this long after the payer signed it. */
+/** An offline authorization may be synced up to this long after the request expired. */
 export const OFFLINE_SYNC_WINDOW_MS = DAY_MS;
 const SKEW_MS = 5 * 60_000;
 
@@ -34,14 +34,21 @@ function requireReceiveAuthority(s: SessionClaims, enterpriseDid: string): void 
   }
 }
 
-/** `POST /pay/request`: the merchant side. Session must carry `pay:receive@<enterpriseDid>` (owner or staff). */
+/** Digest of the staff VAC a staff member sends with a mutating merchant request (`staffVac` in the body). */
+export const staffVacDigestOf = (body: unknown): string | undefined =>
+  isObject(body) && isObject(body['staffVac']) ? digestMultibase(body['staffVac']) : undefined;
+
+/**
+ * `POST /pay/request`: the merchant side. Session must carry `pay:receive@<enterpriseDid>`; a non-owner must also
+ * send `staffVac` matching an active `merchant_staff` row. `offline: true` opts this sale into offline payment
+ * (the pod signs `acceptance.offline: true` into the request); refused when the enterprise's offline allowance is 0.
+ */
 export async function createPayRequest(ctx: GatewayContext, deps: GatewayDeps, s: SessionClaims, body: unknown) {
   if (!isObject(body) || typeof body['enterpriseDid'] !== 'string') throw bad('BAD_REQUEST', 'A payment request needs the enterprise and the total sale.');
   const enterpriseDid = body['enterpriseDid'];
   requireReceiveAuthority(s, enterpriseDid);
-  if (!(await merchantScope(ctx, s)).includes(enterpriseDid)) {
-    throw new ServiceError(403, 'NOT_MERCHANT', 'Your staff authority for this enterprise has been withdrawn.');
-  }
+  const digest = staffVacDigestOf(body);
+  await requireMerchant(ctx, s, enterpriseDid, { requireStaffVac: true, ...(digest ? { staffVacDigest: digest } : {}) });
   const e = await getEnterprise(ctx, enterpriseDid);
   if (!e.accepts_local_credit) throw new ServiceError(403, 'NOT_ACCEPTING', 'This enterprise is not accepting credits right now.');
   const total = body['totalSale'];
@@ -67,6 +74,10 @@ export async function createPayRequest(ctx: GatewayContext, deps: GatewayDeps, s
   const value = floorCents(Math.min(typeof creditValue === 'number' ? cents(creditValue) : shareCap, headroom));
   if (!(value > 0)) throw new ServiceError(403, 'MERCHANT_CEILING', 'This enterprise has reached its acceptance ceiling for now.');
 
+  const offline = body['offline'] === true;
+  if (offline && !(rules.offlineAllowance > 0)) {
+    throw bad('OFFLINE_DISABLED', 'This enterprise does not take offline payments; set an offline allowance first.');
+  }
   const invoice = optString(body['invoice']) ?? `inv_${tid(ctx.now)}`;
   if ((await ctx.db.query('SELECT 1 FROM ledger_entries WHERE invoice = $1', [invoice])).length) {
     throw new ServiceError(409, 'INVOICE_EXISTS', 'That invoice number has already been used.');
@@ -82,14 +93,14 @@ export async function createPayRequest(ctx: GatewayContext, deps: GatewayDeps, s
     totalSale,
     invoice,
     expires: addMs(now, REQUEST_TTL_MS),
-    acceptance: { maxShare: rules.maxShare, requires: [...REQUIRES] },
+    acceptance: { maxShare: rules.maxShare, requires: [...REQUIRES], ...(offline ? { offline: true } : {}) },
   };
   // The pod signs on the enterprise's behalf (the enterprise DID holds no key); `sig` mirrors the proof value.
   const request = sealMessage(deps.podSigner, unsigned as PayRequestMessage & Record<string, any>, now.toISOString());
   const [row] = await ctx.db.query<{ id: string | number }>(
-    `INSERT INTO ledger_entries (payee_did, amount, unit, invoice, request, status, created_at)
-     VALUES ($1, $2, $3, $4, $5::jsonb, 'requested', $6) RETURNING id`,
-    [enterpriseDid, value, unit, invoice, JSON.stringify(request), now.toISOString()],
+    `INSERT INTO ledger_entries (payee_did, amount, unit, invoice, request, status, created_at, rung_up_by)
+     VALUES ($1, $2, $3, $4, $5::jsonb, 'requested', $6, $7) RETURNING id`,
+    [enterpriseDid, value, unit, invoice, JSON.stringify(request), now.toISOString(), s.subject],
   );
   return { request, qr: JSON.stringify(request), transactionId: String(row!.id) };
 }
@@ -104,10 +115,15 @@ export async function createPayRequest(ctx: GatewayContext, deps: GatewayDeps, s
  * enterprise account spent by its owner (presentation subject = session = the enterprise's `owner_did`) — the
  * latter is how enterprises re-spend what they earn.
  *
- * Offline (`authorization.offline === true`): the presentation's challenge need not be the invoice (it may be a
- * stored nonce; signatures, membership and authority are still checked), expiry is judged at `transfer.createdAt`
- * (which must be within the last 24 h), and the enterprise accepts at most `acceptance_rules.offline_allowance`
- * credits per UTC day of offline payments.
+ * Offline (`authorization.offline === true`) is accepted only when the pod-signed request carries
+ * `acceptance.offline: true` (the merchant opted this sale in). Then the presentation's challenge need not be the
+ * invoice (it may be a stored nonce; signatures, membership and authority are still checked), the payer must have
+ * signed before the request expired (`transfer.createdAt ≤ expires`), the gateway must receive it no later than
+ * `expires + 24 h`, and the enterprise accepts at most `acceptance_rules.offline_allowance` credits per UTC day of
+ * offline payments.
+ *
+ * Limits and `credit:account` come only from the payer's own root VACs in the presentation (`rootPodActions`),
+ * never from a forwarded credential.
  */
 export async function authorizePayment(ctx: GatewayContext, deps: GatewayDeps, s: SessionClaims, body: unknown) {
   const auth = isObject(body) ? body['authorization'] : undefined;
@@ -130,11 +146,16 @@ export async function authorizePayment(ctx: GatewayContext, deps: GatewayDeps, s
   // 2. not expired
   const expires = Date.parse(String(request['expires']));
   if (offline) {
-    const signedAt = Date.parse(transfer.createdAt);
-    if (Number.isNaN(signedAt) || signedAt > now.getTime() + SKEW_MS || now.getTime() - signedAt > OFFLINE_SYNC_WINDOW_MS) {
-      throw new ServiceError(410, 'REQUEST_EXPIRED', 'This offline payment was signed too long ago to be accepted; ask the merchant to ring it up again.');
+    if (!isObject(request['acceptance']) || request['acceptance']['offline'] !== true) {
+      throw bad('OFFLINE_NOT_OFFERED', 'The merchant did not offer this sale for offline payment.');
     }
-    if (!(expires > signedAt)) throw new ServiceError(410, 'REQUEST_EXPIRED', 'This payment request had expired when it was signed; ask the merchant to ring it up again.');
+    const signedAt = Date.parse(transfer.createdAt);
+    if (Number.isNaN(signedAt) || signedAt > now.getTime() + SKEW_MS || signedAt > expires + SKEW_MS) {
+      throw new ServiceError(410, 'REQUEST_EXPIRED', 'This payment request had expired when it was signed; ask the merchant to ring it up again.');
+    }
+    if (now.getTime() > expires + OFFLINE_SYNC_WINDOW_MS) {
+      throw new ServiceError(410, 'REQUEST_EXPIRED', 'This offline payment arrived too long after the sale to be accepted; ask the merchant to ring it up again.');
+    }
   } else if (!(expires > now.getTime())) {
     throw new ServiceError(410, 'REQUEST_EXPIRED', 'This payment request has expired; ask the merchant to ring it up again.');
   }
@@ -187,6 +208,11 @@ export async function authorizePayment(ctx: GatewayContext, deps: GatewayDeps, s
     throw bad('BAD_AUTHORIZATION_SIG', 'This authorization is not signed by the person paying.');
   }
 
+  // Own root VACs only: a forwarded credit:account / credit:limit:Ln never counts.
+  const vpCreds = isObject(auth['presentation']) ? auth['presentation']['verifiableCredential'] : undefined;
+  const roots = rootPodActions(ctx, vpCreds, actor);
+  requireRootAction(roots, 'credit:account');
+
   // 5. amount
   const amount = num(entry.amount);
   if (transfer.amount.unit !== ctx.manifest.currency.unit || cents(transfer.amount.value) !== amount || cents(Number(request['amount']?.value)) !== amount) {
@@ -196,7 +222,7 @@ export async function authorizePayment(ctx: GatewayContext, deps: GatewayDeps, s
   return ctx.db.transaction(async () => {
     // 6–8. accounts, limit, ceiling (rows locked for the rest of the transaction)
     if (!payerAccount) throw new ServiceError(409, 'NO_ACCOUNT', 'You do not have a credit account in this pod yet; open one first.');
-    if (payerAccount.kind === 'member') await raiseBand(ctx, transfer.from, verified.authorities);
+    if (payerAccount.kind === 'member') await raiseBand(ctx, transfer.from, [...roots]);
     const locked = await ctx.db.query<AccountRow>('SELECT * FROM accounts WHERE did = ANY($1::text[]) ORDER BY did FOR UPDATE', [[transfer.from, transfer.to]]);
     const payer = locked.find((r) => r.did === transfer.from)!;
     const payee = locked.find((r) => r.did === transfer.to);
@@ -246,12 +272,15 @@ export async function authorizePayment(ctx: GatewayContext, deps: GatewayDeps, s
   });
 }
 
-/** Payer, or owner/staff of the payee, may read an entry. */
+/**
+ * Who may see an entry: the payer (or, when an enterprise paid, its owner); the payee enterprise's owner; and the
+ * staff member who rang the sale up, while still active staff. Other staff do not see each other's sales.
+ */
 export async function requireParty(ctx: GatewayContext, s: SessionClaims, entry: EntryRow): Promise<'payer' | 'merchant'> {
   if (entry.payer_did && entry.payer_did === s.subject) return 'payer';
-  if (entry.payee_did && (await merchantScope(ctx, s)).includes(entry.payee_did)) return 'merchant';
-  // An enterprise's owner is also the payer when the enterprise spent.
-  if (entry.payer_did && (await merchantScope(ctx, s)).includes(entry.payer_did)) return 'payer';
+  if (entry.payer_did && (await isOwner(ctx, s, entry.payer_did))) return 'payer';
+  if (entry.payee_did && (await isOwner(ctx, s, entry.payee_did))) return 'merchant';
+  if (entry.payee_did && entry.rung_up_by === s.subject && (await merchantScope(ctx, s)).includes(entry.payee_did)) return 'merchant';
   throw new ServiceError(403, 'NOT_A_PARTY', 'Only the payer or the receiving enterprise can see this payment.');
 }
 

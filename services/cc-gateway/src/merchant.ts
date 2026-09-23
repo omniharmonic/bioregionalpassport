@@ -20,7 +20,7 @@ import {
 import { EnterpriseRecordSchema, recordUri } from '@passport/lexicons';
 import { json, merchantScope, num, toIso } from '@passport/pos-adapter';
 import { ServiceError, type SessionClaims } from '@passport/service-kit';
-import { accountView, DEFAULT_CEILING_SHARE, ENTERPRISE_LIMIT_FACTOR, highestBand, openAccount, type AccountRow } from './ledger.js';
+import { accountView, DEFAULT_CEILING_SHARE, ENTERPRISE_LIMIT_FACTOR, highestBand, openAccount, requireRootAction, verifiedRootActions, type AccountRow } from './ledger.js';
 import { addMs, atLeast, bad, cents, DAY_MS, isObject, optString, sessionTier, type GatewayContext, type GatewayDeps } from './util.js';
 
 export const ACCEPTANCE_CATEGORIES = ['services', 'suppliers', 'retail'] as const;
@@ -102,8 +102,11 @@ async function writeEnterpriseRecord(ctx: GatewayContext, e: { did: string; owne
 }
 
 /**
- * `POST /merchant/enterprises`. Enterprise account limit = owner's band limit × 3; default acceptance ceiling =
- * 80% of that. Returns the owner's root `pay:receive` VAC (90 days) for the wallet to store.
+ * `POST /merchant/enterprises` (body also carries the owner's `credentials`, see `verifiedRootActions`).
+ * The enterprise account opens with `credit_limit = 0`: an enterprise spends only what it has earned, so opening
+ * more enterprises never adds borrowing power; a steward may set an explicit limit (`setEnterpriseLimit`).
+ * Default acceptance ceiling = 80% × (owner's own root band limit × 3). Returns the owner's root `pay:receive` VAC
+ * (90 days) for the wallet to store.
  */
 export async function createEnterprise(ctx: GatewayContext, deps: GatewayDeps, s: SessionClaims, body: unknown) {
   if (!atLeast(s, 'T1')) throw new ServiceError(403, 'TIER_TOO_LOW', 'Opening an enterprise needs tier T1 or higher.');
@@ -126,10 +129,11 @@ export async function createEnterprise(ctx: GatewayContext, deps: GatewayDeps, s
   const ceilingIn = nonNegative(body['ceiling'], 'The ceiling');
   const offlineIn = nonNegative(body['offlineAllowance'], 'The offline allowance');
 
+  const roots = await verifiedRootActions(ctx, deps, body, s.subject);
+  requireRootAction(roots, 'credit:account');
   const currency = ctx.manifest.currency;
-  const band = highestBand(s.authorities);
-  const limit = cents(currency.limits[band] * ENTERPRISE_LIMIT_FACTOR);
-  const ceiling = cents(ceilingIn ?? DEFAULT_CEILING_SHARE * limit);
+  const band = highestBand([...roots]);
+  const ceiling = cents(ceilingIn ?? DEFAULT_CEILING_SHARE * currency.limits[band] * ENTERPRISE_LIMIT_FACTOR);
   const offlineAllowance = cents(offlineIn ?? currency.offlineAllowancePerDay);
   const maxShare = currency.defaultAcceptance[acceptanceCategory as AcceptanceCategory];
   const did = generateKeyPair().did; // key material discarded by design (see module doc)
@@ -157,7 +161,7 @@ export async function createEnterprise(ctx: GatewayContext, deps: GatewayDeps, s
     `INSERT INTO acceptance_rules (enterprise_did, rules, ceiling, offline_allowance) VALUES ($1, $2::jsonb, $3, $4)`,
     [did, JSON.stringify({ maxShare, category: acceptanceCategory, minSale: 0 }), ceiling, offlineAllowance],
   );
-  const { account } = await openAccount(ctx, { did, kind: 'enterprise', band, limit });
+  const { account } = await openAccount(ctx, { did, kind: 'enterprise', band, limit: 0 });
   const { uri } = await writeEnterpriseRecord(ctx, { did, owner: s.subject, record: enterpriseRecord });
 
   // Root pay:receive VAC for the owner, logged like every other VAC so the VTA status list can revoke it.
@@ -204,7 +208,39 @@ export async function createEnterprise(ctx: GatewayContext, deps: GatewayDeps, s
   };
 }
 
-/** `PUT /merchant/enterprises/:did/rules` (owner). */
+/**
+ * W-9 capture (FR-CI-7) is deferred to the merchant UI: a "W-9 on file" checkbox + date. The gateway only stores
+ * `{ onFile, capturedAt }` on `enterprises.record.w9` (not on the open record).
+ */
+function parseW9(v: unknown): { onFile: boolean; capturedAt: string | null } | undefined {
+  if (v === undefined) return undefined;
+  if (!isObject(v) || typeof v['onFile'] !== 'boolean') throw bad('BAD_REQUEST', 'W-9 status needs onFile true or false.');
+  const at = v['capturedAt'];
+  if (at !== undefined && at !== null && (typeof at !== 'string' || Number.isNaN(Date.parse(at)))) throw bad('BAD_REQUEST', 'The W-9 capture date could not be read.');
+  return { onFile: v['onFile'], capturedAt: typeof at === 'string' ? new Date(at).toISOString() : null };
+}
+
+/**
+ * `PUT /steward/enterprises/:did/limit` (`pep:review`) `{ creditLimit, reason }`: an explicit enterprise credit
+ * line, logged in `steward_flags` under `limit:<did>` with who set it and why.
+ */
+export async function setEnterpriseLimit(ctx: GatewayContext, s: SessionClaims, did: string, body: unknown) {
+  await getEnterprise(ctx, did);
+  const creditLimit = isObject(body) ? nonNegative(body['creditLimit'], 'The credit limit') : undefined;
+  const reason = isObject(body) ? optString(body['reason']) : undefined;
+  if (creditLimit === undefined || !reason) throw bad('BAD_REQUEST', 'Setting an enterprise limit needs the limit and a reason.');
+  const updated = await ctx.db.query(`UPDATE accounts SET credit_limit = $2 WHERE did = $1 AND kind = 'enterprise' RETURNING did`, [did, cents(creditLimit)]);
+  if (!updated.length) throw new ServiceError(404, 'NO_ACCOUNT', 'This enterprise has no credit account in this pod.');
+  const value = { did, creditLimit: cents(creditLimit), reason, by: s.subject, at: ctx.now().toISOString() };
+  await ctx.db.query(
+    `INSERT INTO steward_flags (key, value, updated_at) VALUES ($1, $2::jsonb, $3)
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [`limit:${did}`, JSON.stringify(value), value.at],
+  );
+  return { limit: value };
+}
+
+/** `PUT /merchant/enterprises/:did/rules` (owner). Also accepts `w9: { onFile, capturedAt }`. */
 export async function updateRules(ctx: GatewayContext, s: SessionClaims, did: string, body: unknown) {
   const e = await getEnterprise(ctx, did);
   requireOwner(e, s);
@@ -217,6 +253,7 @@ export async function updateRules(ctx: GatewayContext, s: SessionClaims, did: st
   const ceiling = nonNegative(body['ceiling'], 'The ceiling');
   const offline = nonNegative(body['offlineAllowance'], 'The offline allowance');
   const minSale = nonNegative(body['minSale'], 'The minimum sale');
+  const w9 = parseW9(body['w9']);
   const next: Rules = {
     maxShare: typeof maxShare === 'number' ? maxShare : current.maxShare,
     category: current.category,
@@ -232,8 +269,20 @@ export async function updateRules(ctx: GatewayContext, s: SessionClaims, did: st
   ]);
   await ctx.db.query('UPDATE enterprises SET acceptance_share = $2 WHERE did = $1', [did, next.maxShare]);
   const record = e.record ? json<Record<string, unknown>>(e.record) : null;
-  if (record) await writeEnterpriseRecord(ctx, { did, owner: e.owner_did ?? s.subject, record: { ...record, acceptanceShare: next.maxShare } });
-  return { rules: next };
+  const priorW9 = record?.['w9'];
+  if (record) {
+    const { w9: _old, ...pub } = record;
+    await writeEnterpriseRecord(ctx, { did, owner: e.owner_did ?? s.subject, record: { ...pub, acceptanceShare: next.maxShare } });
+  }
+  const keepW9 = w9 ?? priorW9;
+  if (keepW9 !== undefined) {
+    // W-9 status is private to the enterprise: kept on `enterprises.record`, never on the open `records` row.
+    await ctx.db.query(`UPDATE enterprises SET record = COALESCE(record, '{}'::jsonb) || jsonb_build_object('w9', $2::jsonb) WHERE did = $1`, [
+      did,
+      JSON.stringify(keepW9),
+    ]);
+  }
+  return { rules: next, ...(keepW9 !== undefined ? { w9: keepW9 } : {}) };
 }
 
 /** The owner's current root `pay:receive` VACs for an enterprise (newest first). */
@@ -286,22 +335,35 @@ export async function addStaff(ctx: GatewayContext, deps: GatewayDeps, s: Sessio
   const validUntil = new Date(until).toISOString();
   await ctx.db.query(
     `INSERT INTO merchant_staff (enterprise_did, staff_did, vac_digest, valid_until, created_at) VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (enterprise_did, staff_did, vac_digest) DO NOTHING`,
+     ON CONFLICT (enterprise_did, staff_did, vac_digest)
+     DO UPDATE SET revoked_at = NULL, created_at = excluded.created_at, valid_until = excluded.valid_until`,
     [did, staffDid, digest, validUntil, ctx.now().toISOString()],
   );
   return { staff: { enterpriseDid: did, staffDid, digest, validUntil } };
 }
 
-/** `DELETE /merchant/enterprises/:did/staff/:staffDid` (owner): revokes every grant to that staff member. */
+/**
+ * `DELETE /merchant/enterprises/:did/staff/:staffDid` (owner): revokes every grant to that staff member. For a
+ * person who was never registered, a revoked marker row is written so the removal is on record. Access is an
+ * allow-list (an active row is required), so the marker is informational.
+ */
 export async function revokeStaff(ctx: GatewayContext, s: SessionClaims, did: string, staffDid: string) {
   const e = await getEnterprise(ctx, did);
   requireOwner(e, s);
+  if (!staffDid.startsWith('did:')) throw bad('BAD_REQUEST', 'Name the staff member by their identifier.');
+  const at = ctx.now().toISOString();
   const rows = await ctx.db.query(
     'UPDATE merchant_staff SET revoked_at = $3 WHERE enterprise_did = $1 AND staff_did = $2 AND revoked_at IS NULL RETURNING staff_did',
-    [did, staffDid, ctx.now().toISOString()],
+    [did, staffDid, at],
   );
-  if (!rows.length) throw new ServiceError(404, 'NOT_FOUND', 'That person is not current staff of this enterprise.');
-  return { revoked: rows.length };
+  if (!rows.length) {
+    await ctx.db.query(
+      `INSERT INTO merchant_staff (enterprise_did, staff_did, vac_digest, valid_until, created_at, revoked_at) VALUES ($1, $2, $3, $4, $4, $4)
+       ON CONFLICT DO NOTHING`,
+      [did, staffDid, `revoked-marker:${at}`, at],
+    );
+  }
+  return { revoked: rows.length, staffDid };
 }
 
 /** `POST /merchant/commitment` (owner): the FR-CI-6 commitment record. */
@@ -344,6 +406,7 @@ export async function listMine(ctx: GatewayContext, s: SessionClaims) {
       account: acct ? accountView(ctx, acct) : null,
       exposure: { balance, ceiling, pct: ceiling > 0 ? Math.round((balance / ceiling) * 1000) / 1000 : 0 },
       commitment: commitment ? { id: String(commitment.id), text: commitment.text, signedAt: toIso(commitment.signed_at) } : null,
+      ...(owner ? { w9: (e.record ? json<Record<string, unknown>>(e.record)?.['w9'] : undefined) ?? { onFile: false, capturedAt: null } } : {}),
       ...(staff ? { staff } : {}),
     });
   }

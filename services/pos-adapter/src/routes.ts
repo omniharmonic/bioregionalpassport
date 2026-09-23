@@ -15,6 +15,11 @@ import {
 export interface PosAdapterDeps {
   /** Re-signs receipts after write-back; without it only `external_tender` is recorded. */
   podSigner?: MessageSigner;
+  /**
+   * `digestMultibase` from credential-core, used to match a staff member's `staffVac` (body) against their
+   * `merchant_staff` row. Without it only owners can record tenders through these routes.
+   */
+  digest?: (doc: unknown) => string;
 }
 
 /** Route table mounted by `apps/web` under `/api/pos` (B3 §9 POS adapter). */
@@ -38,7 +43,9 @@ export function createPosAdapterRoutes(deps: PosAdapterDeps = {}): Route<PosCont
         if (typeof id !== 'string' || !id) throw new ServiceError(400, 'BAD_REQUEST', 'Recording a tender needs the transaction id.');
         const entry = await findEntry(ctx, id);
         if (!entry) throw new ServiceError(404, 'NOT_FOUND', 'There is no payment with that id in this pod.');
-        await requireMerchant(ctx, s, entry.payee_did ?? '');
+        const staffVac = req.body['staffVac'];
+        const staffVacDigest = staffVac && typeof staffVac === 'object' && deps.digest ? deps.digest(staffVac) : undefined;
+        await requireMerchant(ctx, s, entry.payee_did ?? '', { requireStaffVac: true, ...(staffVacDigest ? { staffVacDigest } : {}) });
         const tender = parseTender(req.body);
         return { body: await recordTender(ctx, entry, tender, { adapter: manualAdapter, ...(deps.podSigner ? { signer: deps.podSigner } : {}) }) };
       },

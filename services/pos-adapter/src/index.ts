@@ -7,6 +7,7 @@ export {
   sealMessage,
   merchantScope,
   requireMerchant,
+  isOwner,
   requireSessionIn,
   findEntry,
   parseTender,
@@ -18,6 +19,7 @@ export {
   type PosContext,
   type MessageSigner,
   type EntryRow,
+  type MerchantScopeOptions,
   type RecordTenderOptions,
 } from './tender.js';
 export { createPosAdapterRoutes, type PosAdapterDeps } from './routes.js';
