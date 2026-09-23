@@ -44,7 +44,10 @@ export interface RouteRequest {
 
 export interface RouteResult {
   status?: number;
+  /** JSON-serialised by the mount layer, unless it is a string and `headers` sets a non-JSON content type. */
   body: any;
+  /** Extra response headers (e.g. `content-type: text/csv` for a CSV export body string). */
+  headers?: Record<string, string>;
 }
 
 export type RouteAuth = 'none' | 'member' | 'steward' | 'operator' | `authority:${string}`;
