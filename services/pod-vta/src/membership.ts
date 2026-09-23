@@ -9,8 +9,9 @@ import {
 } from '@passport/credential-core';
 import { ServiceError } from '@passport/service-kit';
 import { tierRank, TIERS, type Tier } from '@passport/vocab';
+import { checkVrcPair, findPair } from './edges.js';
 import { canWitnessAt, getEventRow } from './events.js';
-import { issueAuthorities, setEffective } from './pep.js';
+import { issueAuthorities, logGovernance, setEffective } from './pep.js';
 import type { PodVtaDeps, VtaContext } from './types.js';
 import { bad, isObject, json, toIso, toMs, validityWindow } from './util.js';
 
@@ -57,8 +58,9 @@ export interface WitnessCheck {
  *   whose `taskContext` names one of this pod's attestation events with the same task digest, and recorded in
  *   `witness_refs`;
  * - the witnessing convener held an unrevoked VAC with `vwc:issue` that was valid when the VWC was issued;
- * - the presentation carries a signed RelationshipCredential whose digest is the witnessed edge digest and in
- *   which the holder is issuer or subject; its parties must equal the VWC's `edgeParties` (else `EDGE_NOT_YOURS`);
+ * - the presentation carries BOTH signed halves of the witnessed VRC pair (pair digest = the VWC's
+ *   `object.digestMultibase`, see edges.ts), the holder signed one of them, and the pair's issuers equal the VWC's
+ *   `edgeParties` (else `EDGE_NOT_YOURS`);
  * - the VWC admits at most its two edge parties (`witness_refs.used_by`, else `WITNESS_USED`).
  */
 export async function checkWitness(
@@ -106,25 +108,19 @@ export async function checkWitness(
   );
   if (!authority.length) throw witnessInvalid('The convener who witnessed this no longer holds the authority to witness.');
 
-  // Bind the witnessed edge to the applicant through the relationship credential they hold.
+  // Bind the witnessed edge to the applicant: the presentation must carry BOTH signed halves of the witnessed
+  // VRC pair, and the holder must be one of the two issuers.
   const edgeDigest = subject['object']?.['digestMultibase'];
   const creds: unknown[] = Array.isArray(presentation['verifiableCredential']) ? presentation['verifiableCredential'] : [];
-  const vrc = creds.find(
-    (c): c is VerifiableCredential & { proof: DataIntegrityProof } =>
-      isObject(c) &&
-      isType(c, 'RelationshipCredential') &&
-      !!c['proof'] &&
-      typeof edgeDigest === 'string' &&
-      digestMultibase(c) === edgeDigest &&
-      ((c as any).issuer === holder || (c as any).credentialSubject?.id === holder),
-  );
-  if (!vrc) throw edgeNotYours('Include the relationship credential that was witnessed.');
-  const vrcCheck = await verifyDocument(vrc, deps.resolver, { proofPurpose: 'assertionMethod' });
-  if (!vrcCheck.ok) throw edgeNotYours(`The relationship credential signature did not check out (${vrcCheck.error}).`);
-  const vrcParties = [vrc.issuer, vrc.credentialSubject.id].sort();
+  const found = typeof edgeDigest === 'string' ? findPair(creds, edgeDigest) : undefined;
+  if (!found) throw edgeNotYours('Include both signed halves of the witnessed relationship.');
+  const pair = await checkVrcPair(found[0], found[1], deps.resolver);
+  if (!pair.ok) throw edgeNotYours(pair.reason);
+  const vrcParties = [...pair.parties].sort();
+  if (!vrcParties.includes(holder)) throw edgeNotYours('You did not sign either half of this relationship.');
   const vwcParties = [...(parties as string[])].sort();
   if (vrcParties[0] !== vwcParties[0] || vrcParties[1] !== vwcParties[1]) {
-    throw edgeNotYours('The relationship credential does not match the people the convener witnessed.');
+    throw edgeNotYours('The relationship credentials do not match the people the convener witnessed.');
   }
 
   const usedBy = (json<string[]>(ref.used_by) ?? []).filter((d) => typeof d === 'string');
@@ -262,6 +258,9 @@ export async function acknowledgeMembership(ctx: VtaContext, deps: Pick<PodVtaDe
     'Your membership pair is complete.',
     tier === 'T1' ? 'Admission at an attestation event places you at tier T1.' : `You keep tier ${tier}.`,
   ];
+  if (tier !== governance) {
+    await logGovernance(ctx, member.did, governance, tier, ctx.podDid, 'Admitted at an attestation event (T1 floor).');
+  }
   const issued = await issueAuthorities(ctx, deps, member.did, tier, reason);
   await setEffective(ctx, member.did, tier, issued.vacs[0]?.validUntil ?? null);
   return { member: { did: member.did, tier, validUntil }, ...issued };

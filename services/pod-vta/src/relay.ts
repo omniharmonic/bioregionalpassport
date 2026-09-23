@@ -53,7 +53,7 @@ function checkBody(body: unknown): void {
   // Size first, so an oversized body is never parsed.
   let size: number;
   try {
-    size = JSON.stringify(body ?? null).length;
+    size = new TextEncoder().encode(JSON.stringify(body ?? null)).length;
   } catch {
     throw bad('BAD_MESSAGE', 'The relay only carries ceremony messages, and this one is not valid.');
   }

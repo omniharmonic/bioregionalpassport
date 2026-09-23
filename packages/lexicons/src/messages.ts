@@ -52,6 +52,9 @@ export const WitnessRequestMessageSchema = z.object({
   edgeDigest: z.string().min(1),
   taskContext: z.string().min(1),
   requester: z.string().min(1),
+  /** The two signed RelationshipCredential halves of the witnessed edge (the convener forwards both to the VTA). */
+  vrcA: z.unknown().optional(),
+  vrcB: z.unknown().optional(),
 });
 export type WitnessRequestMessage = z.infer<typeof WitnessRequestMessageSchema>;
 

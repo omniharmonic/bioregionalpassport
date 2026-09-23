@@ -15,7 +15,10 @@ export {
   latestVac,
   validVacs,
   setEffective,
-  setGovernanceTier,
+  recordGovernanceTier,
+  stewardSetTier,
+  logGovernance,
+  governanceLog,
   VAC_STATUS_LIST,
   MIN_STATUS_BITS,
   REFRESH_WINDOW_DAYS,
@@ -28,3 +31,4 @@ export { RELAY_MAX_PER_CHANNEL, RelayStore, defaultRelayStore, relayAppend, rela
 export { fileDispute, listDisputes, adjudicateDispute } from './disputes.js';
 export { bootstrapSteward, ceremonyBackHalf, type CeremonyOptions, type CeremonyResult, type CeremonyDeps } from './ceremony.js';
 export { createPodVtaRoutes, openSession, type SessionResponse } from './routes.js';
+export { edgePairDigest, checkVrcPair, findPair, isMirroredPair } from './edges.js';

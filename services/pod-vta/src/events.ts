@@ -1,6 +1,7 @@
 import { buildWitness, digestMultibase, randomNonce, type VerifiableCredential } from '@passport/credential-core';
 import { EventAttestationDocumentSchema } from '@passport/lexicons';
 import { ServiceError } from '@passport/service-kit';
+import { checkVrcPair } from './edges.js';
 import type { PodVtaDeps, VtaContext } from './types.js';
 import { addDays, bad, isObject, json, toIso, toMs } from './util.js';
 
@@ -159,6 +160,11 @@ export async function getEvent(ctx: VtaContext, id: string): Promise<EventView> 
 /**
  * Issues a witness credential (VWC, StatementCredential `dtg:witnessed`) for an edge at an attestation event.
  *
+ * The witnessed edge is the VRC PAIR: the body carries both signed halves `{ vrcA, vrcB, evidence, subject? }`;
+ * both proofs are verified, the halves must mirror each other between two distinct DIDs, and the server derives
+ * `edgeParties = [vrcA.issuer, vrcB.issuer]` and `edgeDigest = edgePairDigest(vrcA, vrcB)` (see edges.ts), so
+ * both people must have signed.
+ *
  * Ruling: the VWC is issued BY THE POD VTA on behalf of the convener — `issuer = ctx.podDid`,
  * `credentialSubject.witnessedBy = <convener DID>`. The server does not hold the convener's key (it lives in
  * their wallet) and the wallet does not hold the pod key, so the pod signs after checking the convener's session
@@ -166,25 +172,20 @@ export async function getEvent(ctx: VtaContext, id: string): Promise<EventView> 
  */
 export async function witnessEdge(
   ctx: VtaContext,
-  deps: Pick<PodVtaDeps, 'podSigner'>,
+  deps: Pick<PodVtaDeps, 'podSigner' | 'resolver'>,
   convener: string,
   eventId: string,
   body: unknown,
 ): Promise<{ vwc: VerifiableCredential }> {
-  if (!isObject(body)) throw bad('BAD_REQUEST', 'A witness request needs an edge digest and evidence.');
-  const { edgeDigest, evidence, subject, edgeParties } = body;
-  if (typeof edgeDigest !== 'string' || !edgeDigest.startsWith('z')) throw bad('BAD_REQUEST', 'edgeDigest must be a multibase digest (z…).');
+  if (!isObject(body)) throw bad('BAD_REQUEST', 'A witness request needs both relationship halves and evidence.');
+  const { vrcA, vrcB, evidence, subject } = body;
   if (evidence !== 'same-event' && evidence !== 'liveness') throw bad('BAD_REQUEST', 'evidence must be same-event or liveness.');
-  if (subject !== undefined && (typeof subject !== 'string' || !subject.startsWith('did:'))) throw bad('BAD_REQUEST', 'subject must be a DID.');
-  if (
-    !Array.isArray(edgeParties) ||
-    edgeParties.length !== 2 ||
-    !edgeParties.every((d) => typeof d === 'string' && d.startsWith('did:')) ||
-    edgeParties[0] === edgeParties[1]
-  ) {
-    throw bad('BAD_REQUEST', 'edgeParties must name the two people in the relationship (issuer DID and subject DID).');
+  const pair = await checkVrcPair(vrcA, vrcB, deps.resolver);
+  if (!pair.ok) throw bad('BAD_PAIR', `A witness request needs both signed halves of one relationship: ${pair.reason}`);
+  const edgeParties = pair.parties;
+  if (subject !== undefined && (typeof subject !== 'string' || !edgeParties.includes(subject))) {
+    throw bad('BAD_REQUEST', 'subject must be one of the two people in the relationship.');
   }
-  if (subject !== undefined && !edgeParties.includes(subject)) throw bad('BAD_REQUEST', 'subject must be one of the edge parties.');
   const row = await getEventRow(ctx, eventId);
   if (!row) throw new ServiceError(404, 'NOT_FOUND', 'There is no event with that id in this pod.');
   if (!canWitnessAt(row)) throw new ServiceError(409, 'NOT_ATTESTATION_EVENT', 'This event is not an attestation event, so it cannot witness relationships.');
@@ -197,13 +198,13 @@ export async function witnessEdge(
   }
   const unsigned = buildWitness({
     issuer: ctx.podDid,
-    edgeDigest,
+    edgeDigest: pair.digest,
     taskContext: row.id,
     taskDigest: row.task_digest!,
     evidence,
     validFrom: now.toISOString(),
     validUntil: addDays(now, WITNESS_VALIDITY_DAYS),
-    ...(subject ? { subject } : {}),
+    ...(typeof subject === 'string' ? { subject } : {}),
   });
   unsigned.credentialSubject['witnessedBy'] = convener;
   unsigned.credentialSubject['edgeParties'] = [edgeParties[0], edgeParties[1]];

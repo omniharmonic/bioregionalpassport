@@ -15,7 +15,8 @@ import { tierDefaultActions } from '@passport/vocab';
 import { podDomain } from './challenges.js';
 import { createEvent, witnessEdge } from './events.js';
 import { acknowledgeMembership, applyMembership } from './membership.js';
-import { issueAuthorities, setEffective, type IssuedAuthorities } from './pep.js';
+import { issueAuthorities, logGovernance, setEffective, type IssuedAuthorities } from './pep.js';
+import { edgePairDigest } from './edges.js';
 import type { PodSigner, PodVtaDeps, VtaContext } from './types.js';
 
 /** Either full VTA deps or the control plane's smoke helpers (`{ signer, resolver }`). */
@@ -37,11 +38,13 @@ function signerOf(deps: SignerDeps): PodSigner {
 export async function bootstrapSteward(ctx: VtaContext, deps: SignerDeps, did: string): Promise<{ member: { did: string; tier: 'T3' } } & IssuedAuthorities> {
   if (typeof did !== 'string' || !did.startsWith('did:')) throw new Error('bootstrapSteward needs a DID.');
   // Governance write: `tier` is the governance record; the PEP's effective tier follows.
+  const [prior] = await ctx.db.query<{ tier: string }>('SELECT tier FROM members WHERE did = $1', [did]);
   await ctx.db.query(
     `INSERT INTO members (did, tier, joined_at) VALUES ($1, 'T3', $2)
      ON CONFLICT (did) DO UPDATE SET tier = 'T3'`,
     [did, ctx.now().toISOString()],
   );
+  if (prior?.tier !== 'T3') await logGovernance(ctx, did, prior?.tier ?? null, 'T3', 'operator', 'First steward bootstrap (B4 launch checklist).');
   const issued = await issueAuthorities(ctx, { podSigner: signerOf(deps) }, did, 'T3', [
     'First steward bootstrap by the pod operator (B4 launch checklist).',
   ]);
@@ -126,21 +129,15 @@ export async function ceremonyBackHalf(ctx: VtaContext, deps: CeremonyDeps, opts
     if (!(await isMember(applicant.did))) createdMembers.push(applicant.did);
     touched.push(applicant.did);
     const peer = opts.peerKey ?? generateKeyPair();
-    const vrc = signDocument(
-      buildRelationship({ issuer: applicant.did, subject: peer.did, bioregion: ctx.slug, formedAt: now.toISOString(), validFrom: now.toISOString() }),
-      applicant,
-      { created: now.toISOString() },
-    );
-    const { vwc } = await witnessEdge(ctx, d, convener.subject, eventId, {
-      edgeDigest: digestMultibase(vrc),
-      evidence: 'same-event',
-      subject: applicant.did,
-      edgeParties: [applicant.did, peer.did],
-    });
+    const at = { formedAt: now.toISOString(), validFrom: now.toISOString() };
+    const vrc = signDocument(buildRelationship({ issuer: applicant.did, subject: peer.did, bioregion: ctx.slug, ...at }), applicant, { created: at.validFrom });
+    const vrcPeer = signDocument(buildRelationship({ issuer: peer.did, subject: applicant.did, bioregion: ctx.slug, ...at }), peer, { created: at.validFrom });
+    const { vwc } = await witnessEdge(ctx, d, convener.subject, eventId, { vrcA: vrc, vrcB: vrcPeer, evidence: 'same-event', subject: applicant.did });
+    if (vwc.credentialSubject['object']?.digestMultibase !== edgePairDigest(vrc, vrcPeer)) throw new Error('The witnessed edge digest is not the pair digest.');
     createdVwcs.push(digestMultibase(vwc));
 
     const binding = { challenge: randomNonce(), domain: podDomain(ctx) };
-    const presentation = createPresentation([vrc], applicant, binding);
+    const presentation = createPresentation([vrc, vrcPeer], applicant, binding);
     const { grant } = await applyMembership(ctx, d, { vwc, presentation }, binding);
 
 
@@ -181,6 +178,9 @@ export async function ceremonyBackHalf(ctx: VtaContext, deps: CeremonyDeps, opts
       await ctx.db.query('DELETE FROM witness_refs WHERE event_id = ANY($1::text[])', [createdEvents]);
       await ctx.db.query('DELETE FROM events WHERE id = ANY($1::text[])', [createdEvents]);
     }
-    if (createdMembers.length) await ctx.db.query('DELETE FROM members WHERE did = ANY($1::text[])', [createdMembers]);
+    if (createdMembers.length) {
+      await ctx.db.query('DELETE FROM governance_log WHERE subject_did = ANY($1::text[])', [createdMembers]);
+      await ctx.db.query('DELETE FROM members WHERE did = ANY($1::text[])', [createdMembers]);
+    }
   }
 }

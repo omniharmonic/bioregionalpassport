@@ -5,11 +5,11 @@ import { DbChallengeStore, defaultChallengeStore, podDomain, type ChallengeStore
 import { adjudicateDispute, fileDispute, listDisputes } from './disputes.js';
 import { createEvent, getEvent, listEvents, witnessEdge } from './events.js';
 import { acknowledgeMembership, applyMembership, listMembers } from './membership.js';
-import { refreshAuthorities, revokeAuthority, setGovernanceTier, statusListCredential, statusListUrl, VAC_STATUS_LIST } from './pep.js';
+import { governanceLog, refreshAuthorities, revokeAuthority, statusListCredential, stewardSetTier, statusListUrl, VAC_STATUS_LIST } from './pep.js';
 import { defaultRelayStore, relayAppend, relayList } from './relay.js';
 import type { PodVtaDeps, VtaContext, VtaRoute } from './types.js';
 import { bad, isObject, json, requireMember, toIso, toMs } from './util.js';
-import { TIERS, tierRank, type Tier } from '@passport/vocab';
+import { TIERS, type Tier } from '@passport/vocab';
 
 const FORBIDDEN_CODES = new Set(['MISSING_AUTHORITY', 'POD_MISMATCH', 'BROADENED_ATTENUATION', 'CHAIN_TOO_DEEP']);
 
@@ -263,7 +263,8 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       },
     },
     {
-      // Governance write (the only route that sets members.tier). Stewards may record T0–T3; T4 is operator-only.
+      // Steward governance write: T0–T2 for members below T3 and below the caller; stewards/anchors protected;
+      // raising to T3+ is reserved for bootstrapSteward/operator paths. Logged in governance_log.
       method: 'POST',
       path: '/steward/members/:did/tier',
       auth: 'authority:pep:review',
@@ -271,11 +272,18 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
         const s = need(ctx, req, 'pep:review');
         const b = req.body;
         const tier = isObject(b) ? b['tier'] : undefined;
-        if (typeof tier !== 'string' || !(TIERS as readonly string[]).includes(tier) || tierRank(tier as Tier) > tierRank('T3')) {
-          throw bad('BAD_REQUEST', 'A steward can record a governance tier from T0 to T3.');
-        }
+        if (typeof tier !== 'string' || !(TIERS as readonly string[]).includes(tier)) throw bad('BAD_REQUEST', 'tier must be one of T0 to T4.');
         if (!isObject(b) || typeof b['reason'] !== 'string' || !b['reason'].trim()) throw bad('BAD_REQUEST', 'A governance decision needs a reason.');
-        return { body: await setGovernanceTier(ctx, req.params['did'] ?? '', tier as Tier, s.subject, b['reason'].trim()) };
+        return { body: await stewardSetTier(ctx, req.params['did'] ?? '', tier as Tier, s, b['reason'].trim()) };
+      },
+    },
+    {
+      method: 'GET',
+      path: '/steward/governance-log',
+      auth: 'authority:pep:review',
+      handler: async (ctx, req) => {
+        need(ctx, req, 'pep:review');
+        return { body: { entries: await governanceLog(ctx) } };
       },
     },
     {

@@ -202,11 +202,64 @@ export async function refreshAuthorities(ctx: VtaContext, deps: Pick<PodVtaDeps,
   };
 }
 
-/** Governance write (steward/operator): records `members.tier`. The PEP applies it at the next refresh. */
-export async function setGovernanceTier(ctx: VtaContext, did: string, tier: Tier, by: string, reason: string): Promise<{ did: string; tier: Tier }> {
-  const rows = await ctx.db.query('UPDATE members SET tier = $2 WHERE did = $1 RETURNING did', [did, tier]);
-  if (!rows.length) throw new ServiceError(404, 'NOT_FOUND', 'There is no member with that DID in this pod.');
-  return { did, tier };
+/** Appends one row to `governance_log` (migration 0007). */
+export async function logGovernance(ctx: VtaContext, did: string, previous: string | null, next: Tier, by: string, reason: string): Promise<void> {
+  await ctx.db.query(
+    'INSERT INTO governance_log (subject_did, previous_tier, new_tier, by_did, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
+    [did, previous, next, by, reason, ctx.now().toISOString()],
+  );
+}
+
+/**
+ * Operator/governance-body write of `members.tier`, unrestricted, always logged. Used by operator paths and
+ * tests; stewards go through `stewardSetTier`.
+ */
+export async function recordGovernanceTier(ctx: VtaContext, did: string, tier: Tier, by: string, reason: string): Promise<{ did: string; tier: Tier; previous: string }> {
+  if (!reason.trim()) throw new ServiceError(400, 'BAD_REQUEST', 'A governance decision needs a reason.');
+  const [row] = await ctx.db.query<{ tier: string }>('SELECT tier FROM members WHERE did = $1', [did]);
+  if (!row) throw new ServiceError(404, 'NOT_FOUND', 'There is no member with that DID in this pod.');
+  await ctx.db.query('UPDATE members SET tier = $2 WHERE did = $1', [did, tier]);
+  await logGovernance(ctx, did, row.tier, tier, by, reason.trim());
+  return { did, tier, previous: row.tier };
+}
+
+const TIER_PROTECTED = 'Only governance can change the tier of a steward or anchor.';
+
+/**
+ * Steward governance write (`POST /steward/members/:did/tier`). A steward may set T0–T2, and only for members
+ * whose governance tier is below T3 and below the steward's own tier; stewards and anchors (≥ T3) are protected
+ * (403 `TIER_PROTECTED`). Raising anyone to T3 or above stays reserved for `bootstrapSteward` / operator paths
+ * (`recordGovernanceTier`). Every change is logged with who, why and the previous tier.
+ */
+export async function stewardSetTier(
+  ctx: VtaContext,
+  did: string,
+  tier: Tier,
+  caller: { subject: string; tier?: string },
+  reason: string,
+): Promise<{ did: string; tier: Tier; previous: string }> {
+  if (tierRank(tier) > tierRank('T2')) throw new ServiceError(403, 'TIER_PROTECTED', 'Raising a member to T3 or above is reserved for pod governance.');
+  const callerTier: Tier = isTier(caller.tier) ? caller.tier : 'T0';
+  const [row] = await ctx.db.query<{ tier: string }>('SELECT tier FROM members WHERE did = $1', [did]);
+  if (!row) throw new ServiceError(404, 'NOT_FOUND', 'There is no member with that DID in this pod.');
+  const current: Tier = isTier(row.tier) ? row.tier : 'T0';
+  if (tierRank(current) >= tierRank('T3') || tierRank(current) >= tierRank(callerTier)) {
+    throw new ServiceError(403, 'TIER_PROTECTED', TIER_PROTECTED);
+  }
+  return recordGovernanceTier(ctx, did, tier, caller.subject, reason);
+}
+
+export async function governanceLog(ctx: VtaContext) {
+  const rows = await ctx.db.query<any>('SELECT * FROM governance_log ORDER BY id DESC LIMIT 500');
+  return rows.map((r) => ({
+    id: String(r.id),
+    subject: r.subject_did,
+    previousTier: r.previous_tier,
+    newTier: r.new_tier,
+    by: r.by_did,
+    reason: r.reason,
+    createdAt: toIso(r.created_at),
+  }));
 }
 
 /** `POST /authority/revoke`: sets `revoked_at` on the log row whose credential digest is `digest`. */
