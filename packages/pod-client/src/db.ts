@@ -86,8 +86,11 @@ export interface ContactRow {
   event?: string;
   vecOut?: VerifiableCredential;
   vecIn?: VerifiableCredential;
-  /** Set when I asked a convener to witness this relationship ("I'm here"). */
-  witnessRequested?: { event: string; at: string };
+  /**
+   * Set when I asked for this relationship to be witnessed: at an event ("I'm here", `event` = the event id), or
+   * by a Trusted neighbor on the spot (`event` = 'meeting', `channel` = that witness's channel, `witness` = their DID).
+   */
+  witnessRequested?: { event: string; at: string; channel?: string; witness?: string };
   /** Digests of witness credentials the pod refused at apply (never picked up again). */
   refusedVwcs?: string[];
   /** The pod's witness credential for this relationship. */

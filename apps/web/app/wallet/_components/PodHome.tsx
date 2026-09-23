@@ -20,6 +20,7 @@ export function PodHome() {
   const [mine, setMine] = useState<Set<string>>(new Set());
   const [events, setEvents] = useState<EventRow[]>([]);
   const [member, setMember] = useState(false);
+  const [canWitness, setCanWitness] = useState(false);
   const [missingKeys, setMissingKeys] = useState(0);
   const [showWhy, setShowWhy] = useState(false);
   const [copiedId, setCopiedId] = useState(false);
@@ -29,15 +30,17 @@ export function PodHome() {
     if (!wallet) return;
     let live = true;
     (async () => {
-      const [c, all, ids, cached, pair, status] = await Promise.all([
+      const [c, all, ids, cached, pair, status, authorities] = await Promise.all([
         wallet.credentials(),
         wallet.contacts(),
         wallet.identifiers(),
         wallet.events(pod.slug),
         wallet.membership(pod.slug),
         recoveryStatus(wallet),
+        wallet.authorities(pod.slug),
       ]);
       if (!live) return;
+      setCanWitness(authorities.includes('vwc:issue'));
       setCreds(c);
       setAllContacts(all);
       setContacts(all.filter((x) => x.pod === pod.slug));
@@ -179,16 +182,28 @@ export function PodHome() {
           ) : (
             <div className="grid gap-3 text-sm">
               <h2 className="text-base font-semibold">Why you are a {tierName}</h2>
-              <p>You have joined {manifest.identity.name}, but membership is only given in person, at an attestation event.</p>
+              <p>You have joined {manifest.identity.name}, but membership is only given in person, when someone witnesses a relationship you formed.</p>
               <h2 className="text-base font-semibold">What would change it</h2>
               <p>
-                Meet a neighbor, then ask a convener to witness your new relationship at an attestation event. When the pod grants membership, you accept it
-                with your own signature.
+                Meet a neighbor, then have your new relationship witnessed: by a convener at an attestation event, or by a trusted neighbor on the spot.
+                When the pod grants membership, you accept it with your own signature.
+              </p>
+              <p>
+                <Link href={w.href('/wallet/witness?ask=1')}>Ask a neighbor to witness</Link>
               </p>
             </div>
           )
         ) : null}
       </Card>
+
+      {canWitness ? (
+        <Link href={w.href('/wallet/witness')} className="no-underline" style={{ color: 'var(--bp-fg)' }}>
+          <Card className="grid gap-1 p-5">
+            <span className="text-lg font-semibold">Witness a relationship</span>
+            <span className="text-sm muted">Two neighbors just met in front of you? Show your witness code and confirm you saw them together — no event needed.</span>
+          </Card>
+        </Link>
+      ) : null}
 
       {missingKeys > 0 ? (
         <Notice kind="warning">

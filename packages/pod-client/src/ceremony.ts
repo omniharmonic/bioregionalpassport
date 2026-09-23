@@ -12,7 +12,7 @@ import {
 } from '@passport/credential-core';
 import { parseMessage, type OobInviteMessage } from '@passport/lexicons';
 import type { ContactRow } from './db.js';
-import type { PodClient } from './client.js';
+import type { MeetingPlace, PodClient, PodEvent } from './client.js';
 import type { RelayMessage, RelayTransport } from './relay.js';
 import { channelFor, defaultResolver, eventChannel, sleep } from './util.js';
 import type { Wallet } from './wallet.js';
@@ -68,6 +68,25 @@ export interface Met {
   edgeDigest: string;
 }
 
+/**
+ * A peer witness's channel (Task 21c): an OOB-style invite with a fresh challenge and no `event`, shown as a QR by a
+ * member holding `vwc:issue`. The two neighbors scan it after they have met and post `witness.request` there;
+ * channel = base58(sha256(challenge)), so only people who saw the QR can read or write it.
+ */
+export interface WitnessChannel {
+  role: 'witness';
+  channel: string;
+  invite: OobInviteMessage;
+  /** The QR payload: the invite plus `goal: WITNESS_GOAL`, so it cannot be mistaken for a "meet me" code. */
+  inviteJson: string;
+  myDid: string;
+}
+
+/** Marks an OOB invite as a witness channel (extra field; lexicons strip it on parse, so it is read raw). */
+export const WITNESS_GOAL = 'org.bioregion.witness';
+/** `witness.request.taskContext` for a request to a peer witness (no scheduled event). */
+export const MEETING_TASK_CONTEXT = 'meeting';
+
 export interface WitnessRequest {
   seq: number;
   edgeDigest: string;
@@ -98,8 +117,7 @@ function valid(m: RelayMessage): (RelayMessage & { body: Record<string, any> }) 
 
 const isType = (v: any, t: string) => Array.isArray(v?.type) && v.type.includes('VerifiableCredential') && v.type.includes(t);
 
-/** Parses and validates an OOB invite from a scanned or pasted QR payload. */
-export function parseInvite(text: string): OobInviteMessage {
+function readInvite(text: string): { invite: OobInviteMessage; goal?: string } {
   let raw: unknown;
   try {
     raw = JSON.parse(text.trim());
@@ -113,7 +131,20 @@ export function parseInvite(text: string): OobInviteMessage {
     throw new Error('That code is not a passport invitation.');
   }
   if (msg.type !== 'org.bioregion.oob.invite') throw new Error('That code is not a passport invitation.');
-  return msg;
+  const goal = (raw as Record<string, unknown>)['goal'];
+  return { invite: msg, ...(typeof goal === 'string' ? { goal } : {}) };
+}
+
+/** Parses and validates an OOB invite from a scanned or pasted QR payload. */
+export function parseInvite(text: string): OobInviteMessage {
+  return readInvite(text).invite;
+}
+
+/** Parses a peer witness's channel code (`goal: WITNESS_GOAL`, no event). */
+export function parseWitnessInvite(text: string): OobInviteMessage {
+  const { invite, goal } = readInvite(text);
+  if (goal !== WITNESS_GOAL || invite.event) throw new Error('That is not a witness code; ask your witness to open “Witness a relationship” in their passport.');
+  return invite;
 }
 
 /**
@@ -273,7 +304,8 @@ export class Ceremony {
 
   /** Scanned an invite: signs my half and posts `vrc.offer` (queued in the outbox when offline). */
   async join(inviteJson: string, opts: { vouch?: VouchScope } = {}): Promise<JoinSession> {
-    const invite = parseInvite(inviteJson);
+    const { invite, goal } = readInvite(inviteJson);
+    if (goal === WITNESS_GOAL) throw new Error('This is a witness code. Meet your neighbor first, then scan it from “Ask a neighbor to witness”.');
     if (invite.pod !== this.pod) throw new Error(`This invitation is for the ${invite.pod} pod.`);
     const me = await this.myKey();
     if (invite.pairwiseDid === me.did) throw new Error('This is your own code; show it to your neighbor instead.');
@@ -408,30 +440,40 @@ export class Ceremony {
    * `dtg:witnessed` statement for this event and `edgeDigest`. The event channel is readable and writable by
    * anyone who knows the event, so anything else is ignored.
    */
-  async verifyWitnessResult(vwc: unknown, event: { id: string }, edgeDigest: string): Promise<VerifiableCredential | undefined> {
+  async verifyWitnessResult(vwc: unknown, event: { id: string } | null, edgeDigest: string): Promise<VerifiableCredential | undefined> {
     const podDid = (await this.wallet.pod(this.pod))?.did;
     if (!podDid || !isType(vwc, 'StatementCredential') || !(vwc as Signed).proof) return undefined;
     const v = vwc as Signed;
     const subj = v.credentialSubject ?? ({} as Record<string, any>);
-    if (v.issuer !== podDid || subj['predicate'] !== 'dtg:witnessed' || subj['taskContext'] !== event.id || subj['object']?.digestMultibase !== edgeDigest) return undefined;
+    // At an event the VWC must be bound to that event; a peer witness's VWC is bound to a meeting Trust Task the
+    // pod created when it witnessed (unknown to the requesters beforehand), so any task id is accepted there.
+    const taskOk = event ? subj['taskContext'] === event.id : typeof subj['taskContext'] === 'string' && subj['taskContext'].length > 0;
+    if (v.issuer !== podDid || subj['predicate'] !== 'dtg:witnessed' || !taskOk || subj['object']?.digestMultibase !== edgeDigest) return undefined;
     const r = await verifyDocument(v, this.resolver, { proofPurpose: 'assertionMethod' }).catch(() => ({ ok: false, controller: undefined }));
     return r.ok && r.controller === podDid ? v : undefined;
   }
 
   /** Convener view: open witness requests at an event (not yet validly answered), one per relationship. */
   async listWitnessRequests(event: { id: string; taskDigest?: string | null }): Promise<WitnessRequest[]> {
-    const msgs = (await this.listAll(eventChannel(event))).map(valid).filter((m): m is RelayMessage & { body: Record<string, any> } => !!m);
+    return this.openRequests(eventChannel(event), event.id, event);
+  }
+
+  /**
+   * Open requests on a channel: valid `witness.request`s for `taskContext` whose VRC pair matches `edgeDigest`,
+   * minus those already answered by a VERIFIED result (a forged "answer" must not hide a real request).
+   */
+  private async openRequests(channel: string, taskContext: string, event: { id: string } | null): Promise<WitnessRequest[]> {
+    const msgs = (await this.listAll(channel)).map(valid).filter((m): m is RelayMessage & { body: Record<string, any> } => !!m);
     const answered = new Set<string>();
     for (const m of msgs) {
       if (m.body.type !== 'org.bioregion.witness.result') continue;
       const d = m.body.vwc?.credentialSubject?.object?.digestMultibase;
-      // A forged "answer" must not hide a real request from the convener.
       if (typeof d === 'string' && !answered.has(d) && (await this.verifyWitnessResult(m.body.vwc, event, d))) answered.add(d);
     }
     const open = new Map<string, WitnessRequest>();
     for (const m of msgs) {
       const b = m.body;
-      if (b.type !== 'org.bioregion.witness.request' || b.taskContext !== event.id || answered.has(b.edgeDigest)) continue;
+      if (b.type !== 'org.bioregion.witness.request' || b.taskContext !== taskContext || answered.has(b.edgeDigest)) continue;
       if (!isType(b.vrcA, 'RelationshipCredential') || !isType(b.vrcB, 'RelationshipCredential')) continue;
       if (pairDigest(b.vrcA, b.vrcB) !== b.edgeDigest) continue;
       if (!open.has(b.edgeDigest)) {
@@ -456,12 +498,16 @@ export class Ceremony {
 
   /** Applicant (or the other party): looks for a verified `witness.result` for my relationship; stores the VWC. */
   async pollWitnessResult(event: { id: string; taskDigest?: string | null }, contactDid: string): Promise<VerifiableCredential | undefined> {
+    return this.pollResult(eventChannel(event), event, contactDid);
+  }
+
+  private async pollResult(channel: string, event: { id: string } | null, contactDid: string): Promise<VerifiableCredential | undefined> {
     const c = await this.wallet.contact(contactDid);
     if (!c?.vrcOut || !c.vrcIn) return undefined;
     if (c.vwc) return c.vwc;
     const edge = pairDigest(c.vrcOut, c.vrcIn);
     const refused = new Set(c.refusedVwcs ?? []);
-    for (const raw of await this.listAll(eventChannel(event))) {
+    for (const raw of await this.listAll(channel)) {
       const m = valid(raw);
       if (!m || m.body.type !== 'org.bioregion.witness.result') continue;
       const vwc = await this.verifyWitnessResult(m.body.vwc, event, edge);
@@ -471,5 +517,74 @@ export class Ceremony {
       return vwc;
     }
     return undefined;
+  }
+
+  // ── peer witnessing (no scheduled event) ────────────────────────────────────────────────────────
+
+  /** Witness (`vwc:issue`): opens a witness channel to show as a QR. The invite omits `event`. */
+  async hostWitness(): Promise<WitnessChannel> {
+    const me = await this.myKey();
+    const challenge = randomNonce(24);
+    const invite: OobInviteMessage = { type: 'org.bioregion.oob.invite', ...(await this.envelope(me.did)), pairwiseDid: me.did, challenge, pod: this.pod };
+    return { role: 'witness', channel: channelFor(challenge), invite, inviteJson: JSON.stringify({ ...invite, goal: WITNESS_GOAL }), myDid: me.did };
+  }
+
+  /**
+   * Requester, after meeting: scanned a witness's code; posts `witness.request { vrcA, vrcB, requester,
+   * taskContext: 'meeting' }` to that witness's channel (queued in the outbox when offline).
+   */
+  async requestPeerWitness(inviteJson: string, contactDid: string): Promise<{ queued: boolean; edgeDigest: string; witness: string }> {
+    const invite = parseWitnessInvite(inviteJson);
+    if (invite.pod !== this.pod) throw new Error(`This witness code is for the ${invite.pod} pod.`);
+    const c = await this.wallet.contact(contactDid);
+    if (!c?.vrcOut || !c.vrcIn) throw new Error('Both halves of this relationship are needed before anyone can witness it.');
+    if (invite.pairwiseDid === c.did || invite.pairwiseDid === c.myDid) throw new Error('Your witness must be someone other than the two of you.');
+    const channel = channelFor(invite.challenge);
+    const edgeDigest = pairDigest(c.vrcOut, c.vrcIn);
+    const r = await this.relay.post(channel, c.myDid, {
+      type: 'org.bioregion.witness.request',
+      ...(await this.envelope(c.myDid)),
+      edgeDigest,
+      taskContext: MEETING_TASK_CONTEXT,
+      requester: c.myDid,
+      vrcA: c.vrcOut,
+      vrcB: c.vrcIn,
+    });
+    await this.wallet.updateContact(contactDid, {
+      edgeDigest,
+      witnessRequested: { event: MEETING_TASK_CONTEXT, channel, witness: invite.pairwiseDid, at: this.wallet.now().toISOString() },
+    });
+    return { queued: !!r.queued, edgeDigest, witness: invite.pairwiseDid };
+  }
+
+  /** Witness view: open requests on my witness channel, one per relationship; never pairs I am part of. */
+  async listPeerWitnessRequests(session: WitnessChannel): Promise<WitnessRequest[]> {
+    const open = await this.openRequests(session.channel, MEETING_TASK_CONTEXT, null);
+    return open.filter((r) => r.vrcA.issuer !== session.myDid && r.vrcB.issuer !== session.myDid);
+  }
+
+  /**
+   * Witness: "I saw these two people together" → `POST /witness` (evidence 'liveness') → posts `witness.result
+   * { vwc }` back on the channel, where the requesters' polling picks it up.
+   */
+  async witnessPeer(client: PodClient, session: WitnessChannel, request: WitnessRequest, opts: { place?: MeetingPlace } = {}): Promise<{ vwc: VerifiableCredential; task: PodEvent }> {
+    if (request.vrcA.issuer === session.myDid || request.vrcB.issuer === session.myDid) throw new Error('You cannot witness your own relationship; ask another neighbor.');
+    const out = await client.witnessMeeting(request.vrcA, request.vrcB, opts.place);
+    const sender = client.persona?.did ?? session.myDid;
+    await this.relay.post(session.channel, sender, {
+      type: 'org.bioregion.witness.result',
+      createdAt: this.wallet.now().toISOString(),
+      seq: await this.wallet.nextSeq(sender),
+      vwc: out.vwc,
+    });
+    return out;
+  }
+
+  /** Requester (either neighbor): looks for a verified result on the witness channel I asked on; stores the VWC. */
+  async pollPeerWitnessResult(contactDid: string): Promise<VerifiableCredential | undefined> {
+    const c = await this.wallet.contact(contactDid);
+    const channel = c?.witnessRequested?.event === MEETING_TASK_CONTEXT ? c.witnessRequested.channel : undefined;
+    if (!channel) return c?.vwc;
+    return this.pollResult(channel, null, contactDid);
   }
 }

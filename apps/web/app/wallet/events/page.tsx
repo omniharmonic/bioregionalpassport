@@ -4,8 +4,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Button, Card, EmptyState, Explain, Field, Input, Notice, PageHeader, Pill } from '@passport/ui-kit';
 import {
-  applyForMembership,
-  optInToIndex,
   withSession,
   type ContactRow,
   type PodEvent,
@@ -13,6 +11,7 @@ import {
 } from '@passport/pod-client';
 import type { VerifiableCredential } from '@passport/credential-core';
 import { Consent } from '../_components/Consent';
+import { WitnessedList } from '../_components/WitnessedList';
 import { useWalletState } from '../_lib/WalletContext';
 import { Did, ErrorNotice, Section, formatDate, isToday, useAction, usePoll } from '../_lib/ui';
 
@@ -157,18 +156,6 @@ function EventDetail({ event, authorities, onBack }: { event: PodEvent; authorit
     waiting.length > 0,
   );
 
-  const apply = useAction(async (contactDid: string) => {
-    const client = await w.clientFor();
-    setGrant(await applyForMembership(w.wallet!, client, contactDid));
-  });
-
-  const optIn = useAction(async (contactDid: string) => {
-    const client = await w.clientFor();
-    const r = await optInToIndex(w.wallet!, client, contactDid, 'relationship');
-    setNote(r.accepted ? 'Counted. The trust index will include this relationship next time it explains your tier.' : 'This relationship was already counted.');
-    await refresh();
-  });
-
   const isConvener = authorities.includes('vwc:issue') && !!personaDid && event.conveners.includes(personaDid);
 
   return (
@@ -243,38 +230,13 @@ function EventDetail({ event, authorities, onBack }: { event: PodEvent; authorit
             </Section>
           ) : null}
 
-          {allWitnessed.length > 0 ? (
-            <Section title="Witnessed">
-              <ErrorNotice error={apply.error ?? optIn.error} />
-              <ul className="grid gap-3">
-                {(witnessed.length ? witnessed : allWitnessed).map((c) => (
-                  <li key={c.did}>
-                    <Card className="flex flex-wrap items-center justify-between gap-3 p-4">
-                      <span>
-                        <span className="font-medium">{c.name ?? 'A neighbor'}</span> <Pill>Witnessed</Pill>
-                      </span>
-                      {!member ? (
-                        <Button onClick={() => void apply.run(c.did)} disabled={apply.busy}>
-                          {apply.busy ? 'Applying…' : 'Apply for membership'}
-                        </Button>
-                      ) : c.committed?.some((x) => x.scope === 'relationship') ? (
-                        <span className="text-sm muted">Counted in the trust index</span>
-                      ) : (
-                        <Button variant="secondary" onClick={() => void optIn.run(c.did)} disabled={optIn.busy}>
-                          Count it toward my trust (opt in)
-                        </Button>
-                      )}
-                    </Card>
-                  </li>
-                ))}
-              </ul>
-              {member ? (
-                <Explain>The trust index only sees a salted fingerprint of this relationship, and only if you choose to count it.</Explain>
-              ) : (
-                <Explain>Applying asks the pod for membership; nothing is final until you accept it with your own signature.</Explain>
-              )}
-            </Section>
-          ) : null}
+          <WitnessedList
+            contacts={witnessed.length ? witnessed : allWitnessed}
+            member={member}
+            onGrant={setGrant}
+            onNote={setNote}
+            onChanged={refresh}
+          />
 
           {authorities.includes('vwc:issue') ? (
             isConvener ? (

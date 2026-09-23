@@ -54,8 +54,11 @@ export function VouchPrompt({ contact, onDone }: { contact: ContactRow; onDone?:
         <Button onClick={() => void save.run()} disabled={save.busy}>
           {scope ? 'Sign my vouch and save' : 'Save'}
         </Button>
-        <Button variant="secondary" href={w.href('/wallet/events')}>
-          Ask a convener to witness this
+        <Button variant="secondary" href={w.href('/wallet/witness?ask=1')}>
+          Ask a trusted neighbor to witness this
+        </Button>
+        <Button variant="ghost" href={w.href('/wallet/events')}>
+          Or at an event
         </Button>
       </div>
     </Card>

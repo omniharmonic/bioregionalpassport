@@ -126,7 +126,7 @@ export default function MeetPage() {
         </Card>
       )}
 
-      <Explain>Each phone signs one half of your relationship with its own key; nothing is recorded by the pod until a convener witnesses it.</Explain>
+      <Explain>Each phone signs one half of your relationship with its own key; nothing is recorded by the pod until a convener or a trusted neighbor witnesses it.</Explain>
       {w.pendingOutbox ? <Notice kind="info">Some messages are waiting for a connection.</Notice> : null}
     </div>
   );

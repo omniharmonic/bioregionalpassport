@@ -7,7 +7,7 @@ import { createResolver, didWebDocument, generateKeyPair, keyPairForDid, signDoc
 import { createTestDb, createTestPod, withPod, type Db } from '@passport/db';
 import { bootstrapSteward, createPodVtaRoutes, MemoryChallengeStore, RelayStore, type PodSigner, type PodVtaDeps, type VtaContext, type VtaRoute } from '@passport/pod-vta';
 import { errorResult, type SessionClaims } from '@passport/service-kit';
-import { boulderManifest, defaultTrustPolicy } from '@passport/tenant-config';
+import { boulderManifest, defaultTrustPolicy, type TrustPolicy } from '@passport/tenant-config';
 import { createTrustIndexRoutes, ensureIndexTables, recommendTier } from '@passport/trust-index';
 import { readSession } from '@passport/verifier-sdk';
 import type { FetchLike } from '../outbox.js';
@@ -49,7 +49,7 @@ export interface CookieJar {
   session?: SessionClaims;
 }
 
-export async function createHarness(): Promise<Harness> {
+export async function createHarness(opts: { policy?: TrustPolicy } = {}): Promise<Harness> {
   const db = await createTestDb();
   await createTestPod(db, SLUG);
   await withPod(db, SLUG, (tx) => ensureIndexTables(tx));
@@ -66,7 +66,7 @@ export async function createHarness(): Promise<Harness> {
   };
   const vta = createPodVtaRoutes(deps);
   const index = createTrustIndexRoutes({ resolver }) as unknown as AnyRoute[];
-  const policy = defaultTrustPolicy(POD_DID);
+  const policy = opts.policy ?? defaultTrustPolicy(POD_DID);
   const ctxFor = (tx: Db): VtaContext => ({ slug: SLUG, podDid: POD_DID, db: tx, manifest: boulderManifest, policy, now: () => new Date(), platformDomain: DOMAIN });
   const run = <T>(fn: (ctx: VtaContext) => Promise<T>) => withPod(db, SLUG, (tx) => fn(ctxFor(tx)));
 

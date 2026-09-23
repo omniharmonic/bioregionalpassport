@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import { buildMembershipGrant, buildWitness, createResolver, didWebDocument, digestMultibase, generateKeyPair, keyPairForDid, randomNonce, signDocument, type KeyPair } from '@passport/credential-core';
 import { boulderManifest } from '@passport/tenant-config';
 import { afterEach, describe, expect, it } from 'vitest';
-import { Ceremony, pairDigest, parseInvite } from './ceremony.js';
+import { Ceremony, pairDigest, parseInvite, parseWitnessInvite } from './ceremony.js';
 import { MemoryRelay } from './relay.js';
 import { eventChannel } from './util.js';
 import { verifyGrant } from './membership.js';
@@ -137,6 +137,46 @@ describe('ceremony over a relay', () => {
     await expect(verifyGrant(a, grantTo('did:key:z6MkSomeoneElse'), resolver)).rejects.toThrow('made out to a different identifier');
     const stranger = { ...grantTo(persona), issuer: 'did:web:example.org:dids:elsewhere' };
     await expect(verifyGrant(a, stranger, resolver)).rejects.toThrow('not from a pod your passport has joined');
+  });
+
+  it('peer witness channel: results bound to any meeting task are verified, event results stay event-bound', async () => {
+    const relay = new MemoryRelay();
+    const podKey = keyPairForDid(POD_DID, generateKeyPair().privateKey);
+    const resolver = createResolver({ staticDocs: { [POD_DID]: didWebDocument(POD_DID, podKey.publicKeyMultibase) } });
+    const a = await phone();
+    const b = await phone();
+    const w = await phone();
+    const ca = new Ceremony({ wallet: a, relay, pod: 'boulder', resolver });
+    const cb = new Ceremony({ wallet: b, relay, pod: 'boulder', resolver });
+    const cw = new Ceremony({ wallet: w, relay, pod: 'boulder', resolver });
+    const s = await cb.host();
+    const j = await ca.join(s.inviteJson);
+    const met = (await cb.pollHost(s))!;
+    await ca.pollJoin(j);
+    const bDid = met.vrcOut.issuer;
+
+    const channel = await cw.hostWitness();
+    expect(() => parseWitnessInvite(s.inviteJson)).toThrow('That is not a witness code');
+    await expect(ca.join(channel.inviteJson)).rejects.toThrow('This is a witness code');
+    await ca.requestPeerWitness(channel.inviteJson, bDid);
+    await ca.requestPeerWitness(channel.inviteJson, bDid); // a repeat collapses to one request
+    expect(await cw.listPeerWitnessRequests(channel)).toHaveLength(1);
+    expect(await ca.pollPeerWitnessResult(bDid)).toBeUndefined();
+
+    const vwcFor = (key: KeyPair, edge: string, task: string) =>
+      signDocument(buildWitness({ issuer: POD_DID, edgeDigest: edge, taskContext: task, taskDigest: 'zTask', evidence: 'liveness', validFrom: new Date().toISOString() }), key);
+    const post = (vwc: unknown) => relay.post(channel.channel, 'someone', { type: 'org.bioregion.witness.result', createdAt: new Date().toISOString(), seq: 1, vwc });
+    await post(vwcFor(keyPairForDid(POD_DID, generateKeyPair().privateKey), met.edgeDigest, 'meet-x'));
+    await post(vwcFor(podKey, 'zSomeOtherEdge', 'meet-x'));
+    expect(await ca.pollPeerWitnessResult(bDid)).toBeUndefined();
+    expect(await cw.listPeerWitnessRequests(channel)).toHaveLength(1);
+    const good = vwcFor(podKey, met.edgeDigest, 'meet-abc');
+    await post(good);
+    expect(await ca.pollPeerWitnessResult(bDid)).toMatchObject({ issuer: POD_DID });
+    expect(await cw.listPeerWitnessRequests(channel)).toHaveLength(0);
+    // The same meeting VWC is not accepted as an answer at an event it is not bound to.
+    expect(await ca.verifyWitnessResult(good, { id: 'evt_other' }, met.edgeDigest)).toBeUndefined();
+    expect(await ca.verifyWitnessResult(good, null, met.edgeDigest)).toBeTruthy();
   });
 
   it('can sign with a pairwise identifier instead of the persona', async () => {

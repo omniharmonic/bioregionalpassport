@@ -26,6 +26,16 @@ export interface PodEvent {
   attestation: boolean;
   taskDigest: string | null;
   taskDocument?: unknown;
+  /** 'meeting' for the ad-hoc Trust Task a peer witness creates (`POST /witness`); scheduled gatherings are 'event'. */
+  kind?: 'event' | 'meeting';
+}
+
+/** Where two neighbors met, optionally sent with a peer witness (`POST /witness`). */
+export interface MeetingPlace {
+  placeId?: string;
+  lat?: number;
+  lon?: number;
+  name?: string;
 }
 
 export interface SessionInfo {
@@ -246,6 +256,14 @@ export class PodClient {
   async witness(eventId: string, vrcA: VerifiableCredential, vrcB: VerifiableCredential, evidence: 'same-event' | 'liveness' = 'same-event'): Promise<VerifiableCredential> {
     const r = await this.postNow<{ vwc: VerifiableCredential }>('vta', `/events/${encodeURIComponent(eventId)}/witness`, { vrcA, vrcB, evidence });
     return r.vwc;
+  }
+
+  /**
+   * Peer witnessing (`vwc:issue`, e.g. a Trusted member under `admission.witnessTier: 'T2'`): `POST /witness
+   * { vrcA, vrcB, evidence: 'liveness', place? }` → the pod-signed VWC bound to a new meeting Trust Task.
+   */
+  async witnessMeeting(vrcA: VerifiableCredential, vrcB: VerifiableCredential, place?: MeetingPlace): Promise<{ vwc: VerifiableCredential; task: PodEvent }> {
+    return this.postNow<{ vwc: VerifiableCredential; task: PodEvent }>('vta', '/witness', { vrcA, vrcB, evidence: 'liveness', ...(place ? { place } : {}) });
   }
 
   // ── membership ──────────────────────────────────────────────────────────────────────────────────
