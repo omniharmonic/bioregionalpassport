@@ -1,15 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { createResolver, digestMultibase, type VerifiableCredential } from '@passport/credential-core';
+import { buildAuthority, buildMembershipGrant, createResolver, digestMultibase, type VerifiableCredential } from '@passport/credential-core';
 import { verifyDTG, type VerifyPolicy } from './index.js';
 import {
   BOULDER,
   CHALLENGE,
   DOMAIN,
   ENTERPRISE,
+  OTHER_ENTERPRISE,
+  STAFF_UNTIL,
   GARDEN_GROUP,
   NOW,
   T1_ACTIONS,
   TENANT_ZERO,
+  FROM,
   ack,
   delegationHop,
   endorsement,
@@ -110,13 +113,14 @@ describe('verifyDTG', () => {
 
   it('accepts a group vote through an accepted delegation and reports delegatedFor', async () => {
     const vp = present(
-      [...membershipPair(boulder, alice), ...delegationHop(group, alice, ['round:vote']), vac(boulder, GARDEN_GROUP, ['round:vote', 'round:comment'])],
+      [...membershipPair(boulder, alice), ...delegationHop(group, alice, ['round:vote']), vac(boulder, GARDEN_GROUP, ['round:vote', 'round:propose', 'group:create'])],
       alice,
     );
     const r = await verifyDTG(vp, policy({ requireAuthority: ['round:vote'], allowDelegation: true }), deps());
     expect(r.ok).toBe(true);
     expect(r.delegatedFor).toBe(GARDEN_GROUP);
-    expect(r.authorities).toEqual(['round:comment', 'round:vote']);
+    // Only the delegated scope, not everything on the group's VAC.
+    expect(r.authorities).toEqual(['round:vote']);
     expect(r.explanation).toContain('You act for garden-collective through a delegation of 1 hop.');
   });
 
@@ -137,17 +141,93 @@ describe('verifyDTG', () => {
   it('accepts pay:receive attenuated from owner to staff, reporting the enterprise', async () => {
     const { root, child } = payReceiveChain(bob, carol);
     const vp = present([...membershipPair(boulder, carol), root, child], carol);
-    const r = await verifyDTG(vp, policy({ requireAuthority: ['pay:receive'] }), deps());
+    const r = await verifyDTG(vp, policy({ requireAuthority: [`pay:receive@${ENTERPRISE}`] }), deps());
     expect(r.ok).toBe(true);
-    expect(r.authorities).toEqual(['pay:receive']);
+    expect(r.authorities).toEqual([`pay:receive@${ENTERPRISE}`]);
     expect(r.explanation).toContain('Authority to receive payments at moxie-bread is valid until 2026-10-10.');
     expect(ENTERPRISE).toContain('moxie-bread');
   });
 
   it('refuses an attenuated VAC whose parent is not presented', async () => {
     const { child } = payReceiveChain(bob, carol);
-    const r = await verifyDTG(present([...membershipPair(boulder, carol), child], carol), policy({ requireAuthority: ['pay:receive'] }), deps());
+    const r = await verifyDTG(present([...membershipPair(boulder, carol), child], carol), policy({ requireAuthority: [`pay:receive@${ENTERPRISE}`] }), deps());
     expect(r.error?.code).toBe('BROADENED_ATTENUATION');
+  });
+
+  it('refuses staff of enterprise A at a gate for enterprise B, and a bare pay:receive requirement', async () => {
+    const { root, child } = payReceiveChain(bob, carol, ENTERPRISE);
+    const vp = present([...membershipPair(boulder, carol), root, child], carol);
+    const atB = await verifyDTG(vp, policy({ requireAuthority: [`pay:receive@${OTHER_ENTERPRISE}`] }), deps());
+    expect(atB.error?.code).toBe('MISSING_AUTHORITY');
+    const atA = await verifyDTG(vp, policy({ requireAuthority: [`pay:receive@${ENTERPRISE}`] }), deps());
+    expect(atA.ok).toBe(true);
+    const bare = await verifyDTG(vp, policy({ requireAuthority: ['pay:receive'] }), deps());
+    expect(bare.error).toEqual({ code: 'MISSING_AUTHORITY', message: 'This gate needs pay:receive scoped to an enterprise.' });
+  });
+
+  it("uses the holder's own authority first; an unrelated delegation does not interfere", async () => {
+    const vp = present(
+      [...membershipPair(boulder, alice), vac(boulder, alice.did, ['round:vote']), ...delegationHop(group, alice, ['event:attend']), vac(boulder, GARDEN_GROUP, ['event:attend'])],
+      alice,
+    );
+    const r = await verifyDTG(vp, policy({ requireAuthority: ['round:vote'], allowDelegation: true }), deps());
+    expect(r.ok).toBe(true);
+    expect(r.delegatedFor).toBeUndefined();
+    expect(r.authorities).toEqual(['round:vote']);
+  });
+
+  it('requires a challenge and domain unless allowReplay is set', async () => {
+    const vp = present([...membershipPair(boulder, alice), t1()], alice);
+    const noChallenge = await verifyDTG(vp, policy({ challenge: undefined }), deps());
+    expect(noChallenge.error).toEqual({ code: 'BAD_CHALLENGE', message: 'This gate requires a fresh challenge.' });
+    expect((await verifyDTG(vp, policy({ domain: undefined }), deps())).error?.code).toBe('BAD_CHALLENGE');
+    expect((await verifyDTG(vp, policy({ challenge: undefined, domain: undefined, allowReplay: true }), deps())).ok).toBe(true);
+  });
+
+  it('validates maxClockSkewSec and still refuses an expired VAC at the maximum skew', async () => {
+    const vp = present([...membershipPair(boulder, alice), t1()], alice);
+    await expect(verifyDTG(vp, policy({ maxClockSkewSec: Number.NaN }), deps())).rejects.toThrow('maxClockSkewSec must be a finite number between 0 and 600');
+    await expect(verifyDTG(vp, policy({ maxClockSkewSec: 1e9 }), deps())).rejects.toThrow('maxClockSkewSec must be a finite number between 0 and 600');
+    await expect(verifyDTG(vp, policy({ maxClockSkewSec: Infinity }), deps())).rejects.toThrow();
+    await expect(verifyDTG(vp, policy({ maxClockSkewSec: -1 }), deps())).rejects.toThrow();
+    const old = vac(boulder, alice.did, ['event:attend'], { validFrom: '2026-07-15T00:00:00Z', validUntil: '2026-09-01T00:00:00Z' });
+    const r = await verifyDTG(present([...membershipPair(boulder, alice), old], alice), policy({ maxClockSkewSec: 600 }), deps());
+    expect(r.error?.code).toBe('EXPIRED');
+  });
+
+  it('reports registry and status-list outages as UPSTREAM_UNAVAILABLE with a fixed sentence', async () => {
+    const vp = present([...membershipPair(boulder, alice), t1()], alice);
+    const registry = { resolvePods: async (): Promise<string[]> => { throw new Error('ECONNREFUSED 10.0.0.1:5432 secret-host'); } };
+    const r = await verifyDTG(vp, policy({ acceptedPods: 'registry', registry }), deps());
+    expect(r.error).toEqual({ code: 'UPSTREAM_UNAVAILABLE', message: 'The list of accepted pods could not be loaded right now, so this gate cannot decide.' });
+  });
+
+  describe('B3 §2 validity ceilings', () => {
+    // Hand-signed credentials whose validity exceeds what the builders allow (builders would refuse).
+    const overlong = (vc: VerifiableCredential, until: string): VerifiableCredential => ({ ...vc, validUntil: until });
+
+    it('refuses a membership grant valid for more than 90 days', async () => {
+      const unsigned = overlong(
+        buildMembershipGrant({ pod: BOULDER, member: alice.did, bioregion: 'boulder', placeIds: [], governance: 'https://x', validFrom: FROM, validUntil: '2026-12-01T00:00:00Z', nonce: 'bm9uY2Utbm9uY2Utbm9uY2U' }),
+        '2027-06-01T00:00:00Z',
+      );
+      const g = sign(unsigned, boulder);
+      const r = await verifyDTG(present([g, ack(alice, boulder, digestMultibase(g)), t1()], alice), policy(), deps());
+      expect(r.error).toEqual({ code: 'EXPIRED', message: 'This credential was issued with a longer validity than the profile allows.' });
+    });
+
+    it('refuses a root VAC over 90 days and an attenuated VAC over 30 days', async () => {
+      const longRoot = sign(overlong(buildAuthority({ issuer: BOULDER, subject: alice.did, scope: BOULDER, actions: ['event:attend'], validFrom: FROM, validUntil: '2026-12-01T00:00:00Z' }), '2027-06-01T00:00:00Z'), boulder);
+      expect((await verifyDTG(present([...membershipPair(boulder, alice), longRoot], alice), policy(), deps())).error?.code).toBe('EXPIRED');
+      const { root } = payReceiveChain(bob, carol);
+      const longChild = sign(
+        buildAuthority({ issuer: bob.did, subject: carol.did, scope: ENTERPRISE, actions: ['pay:receive'], parent: digestMultibase(root), depth: 1, validFrom: FROM, validUntil: '2026-11-15T00:00:00Z' }),
+        bob,
+      );
+      const r = await verifyDTG(present([...membershipPair(boulder, carol), root, longChild], carol), policy({ requireAuthority: [`pay:receive@${ENTERPRISE}`] }), deps());
+      expect(r.error?.message).toBe('This credential was issued with a longer validity than the profile allows.');
+      expect(STAFF_UNTIL).toBe('2026-10-10T00:00:00Z');
+    });
   });
 
   it('refuses an ack with no grant as PAIR_INCOMPLETE', async () => {
@@ -171,6 +251,11 @@ describe('verifyDTG', () => {
       const r = await verifyDTG(present([...pairWithStatus(), t1()], alice), policy(), deps());
       expect(r.ok).toBe(true);
       expect(r.explanation).toContain('Status list not checked.');
+    });
+
+    it('reports a failing status fetch as UPSTREAM_UNAVAILABLE without leaking the inner error', async () => {
+      const r = await verifyDTG(present([...pairWithStatus(), t1()], alice), policy(), deps({ statusFetch: async () => { throw new Error('boom internal detail'); } }));
+      expect(r.error).toEqual({ code: 'UPSTREAM_UNAVAILABLE', message: 'The credential status list could not be checked right now, so this gate cannot decide.' });
     });
 
     it('refuses a revoked credential as EXPIRED, mentioning revocation', async () => {

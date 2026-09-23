@@ -2,6 +2,7 @@ import {
   checkAuthorityChain,
   checkDelegationChain,
   digestMultibase,
+  MAX_VALIDITY_DAYS,
   isMembershipPairComplete,
   verifyDocument,
   type DataIntegrityProof,
@@ -25,6 +26,7 @@ export const ERROR_CODES = [
   'UNKNOWN_PREDICATE',
   'BAD_PROOF',
   'BAD_CHALLENGE',
+  'UPSTREAM_UNAVAILABLE',
 ] as const;
 export type VerifyErrorCode = (typeof ERROR_CODES)[number];
 
@@ -35,8 +37,11 @@ export interface VerifyPolicy {
   allowDelegation?: boolean;
   maxClockSkewSec?: number;
   statusCheck?: 'ifPresent' | 'never';
+  /** Required (with `domain`) unless `allowReplay` is true. */
   challenge?: string;
   domain?: string;
+  /** Explicit opt-out of challenge/domain binding (tests, offline re-verification). */
+  allowReplay?: boolean;
   registry?: { resolvePods(): Promise<string[]> };
   /** Optional display names for pod DIDs, used in explanations ("Boulder Commons"). */
   podNames?: Record<string, string>;
@@ -61,6 +66,20 @@ export interface VerifyDeps {
 }
 
 const DEFAULT_SKEW_SEC = 300;
+const MAX_SKEW_SEC = 600;
+const DAY_MS = 86_400_000;
+const CEILING_MESSAGE = 'This credential was issued with a longer validity than the profile allows.';
+const PAY_RECEIVE_UNSCOPED = 'This gate needs pay:receive scoped to an enterprise.';
+
+/** A `requireAuthority` entry: `action` or `action@<scopeDid>` (e.g. `pay:receive@did:web:…:moxie-bread`). */
+export function parseAuthorityRequirement(entry: string): { action: string; scope?: string } {
+  const at = entry.indexOf('@');
+  if (at < 0) return { action: entry };
+  const action = entry.slice(0, at);
+  const scope = entry.slice(at + 1);
+  if (!action || !scope.startsWith('did:')) throw new Error(`Invalid scoped authority requirement: ${entry}`);
+  return { action, scope };
+}
 const MAX_ATTENUATION_HOPS = 8;
 
 const isType = (vc: VerifiableCredential, t: string): boolean =>
@@ -113,6 +132,14 @@ export async function verifyDTG(
   policy: VerifyPolicy,
   deps: VerifyDeps,
 ): Promise<VerifyResult> {
+  const skew = policy?.maxClockSkewSec ?? DEFAULT_SKEW_SEC;
+  if (typeof skew !== 'number' || !Number.isFinite(skew) || skew < 0 || skew > MAX_SKEW_SEC) {
+    throw new Error('maxClockSkewSec must be a finite number between 0 and 600');
+  }
+  if (policy.acceptedPods === 'registry' && !policy.registry) {
+    throw new Error('policy.acceptedPods is "registry" but no registry was provided.');
+  }
+  for (const entry of policy.requireAuthority ?? []) parseAuthorityRequirement(entry);
   const explanation: string[] = [];
   const result: VerifyResult = { ok: false, authorities: [], explanation };
   try {
@@ -137,7 +164,7 @@ export async function verifyDTG(
 async function run(vp: VerifiablePresentation, policy: VerifyPolicy, deps: VerifyDeps, result: VerifyResult): Promise<void> {
   const explanation = result.explanation;
   const now = (deps.now ?? (() => new Date()))().getTime();
-  const skewMs = Math.max(0, policy.maxClockSkewSec ?? DEFAULT_SKEW_SEC) * 1000;
+  const skewMs = (policy.maxClockSkewSec ?? DEFAULT_SKEW_SEC) * 1000;
 
   // ── 1. presentation proof ────────────────────────────────────────────────────────────────────────
   if (!vp || typeof vp !== 'object' || typeof vp.holder !== 'string' || !vp.holder) {
@@ -152,6 +179,9 @@ async function run(vp: VerifiablePresentation, policy: VerifyPolicy, deps: Verif
   if (!proof) throw new Refusal('BAD_PROOF', 'This presentation is not signed by its holder.');
   if (proof.proofPurpose !== 'authentication') {
     throw new Refusal('BAD_PROOF', 'This presentation was not signed for sign-in (authentication).');
+  }
+  if (!policy.allowReplay && (!policy.challenge || !policy.domain)) {
+    throw new Refusal('BAD_CHALLENGE', 'This gate requires a fresh challenge.');
   }
   if (policy.challenge !== undefined && proof.challenge !== policy.challenge) {
     throw new Refusal('BAD_CHALLENGE', 'This presentation answers a different challenge, so it may be a replay.');
@@ -189,11 +219,27 @@ async function run(vp: VerifiablePresentation, policy: VerifyPolicy, deps: Verif
     }
   }
 
+  // ── B3 §2 validity ceilings on what is presented ─────────────────────────────────────────────────
+  for (const vc of creds) {
+    let maxDays: number | undefined;
+    if (isType(vc, 'MembershipCredential')) maxDays = MAX_VALIDITY_DAYS.membership;
+    else if (isType(vc, 'InvitationCredential')) maxDays = MAX_VALIDITY_DAYS.invitation;
+    else if (isType(vc, 'AuthorityCredential')) {
+      maxDays = vc.credentialSubject?.['authority']?.parent ? MAX_VALIDITY_DAYS.attenuatedAuthority : MAX_VALIDITY_DAYS.authority;
+    }
+    if (maxDays === undefined || vc.validUntil === undefined) continue;
+    if (Date.parse(vc.validUntil) - Date.parse(vc.validFrom) > maxDays * DAY_MS) throw new Refusal('EXPIRED', CEILING_MESSAGE);
+  }
+
   // ── accepted pods ────────────────────────────────────────────────────────────────────────────────
   let accepted: string[];
   if (policy.acceptedPods === 'registry') {
-    if (!policy.registry) throw new Error('policy.acceptedPods is "registry" but no registry was provided.');
-    accepted = await policy.registry.resolvePods();
+    try {
+      accepted = await policy.registry!.resolvePods();
+      if (!Array.isArray(accepted)) throw new Error('registry returned no list');
+    } catch {
+      throw new Refusal('UPSTREAM_UNAVAILABLE', 'The list of accepted pods could not be loaded right now, so this gate cannot decide.');
+    }
   } else accepted = Array.isArray(policy.acceptedPods) ? policy.acceptedPods : [];
   const acceptedSet = new Set(accepted);
 
@@ -210,69 +256,91 @@ async function run(vp: VerifiablePresentation, policy: VerifyPolicy, deps: Verif
   const pod = checkMembership(creds, acceptedSet, ctx, requireMembership);
   if (pod) result.pod = pod;
 
-  // ── 5. delegation ────────────────────────────────────────────────────────────────────────────────
-  const required = policy.requireAuthority ?? [];
+  // ── 4 + 5. authorities, own first, delegation only for what the holder cannot satisfy ─────────────
+  const required = (policy.requireAuthority ?? []).map((entry) => ({ entry, ...parseAuthorityRequirement(entry) }));
   const vdcs = creds.filter((vc) => isType(vc, 'DelegationCredential'));
   // Grants carry `delegation.scope` and no `accepts`; acceptances carry `delegation.accepts` (grant digest).
   const vdcGrants = vdcs.filter((vc) => Array.isArray(vc.credentialSubject?.['delegation']?.scope) && !vc.credentialSubject['delegation'].accepts);
   const vdcAcceptances = vdcs.filter((vc) => typeof vc.credentialSubject?.['delegation']?.accepts === 'string');
-  let principal: string | undefined;
-  if (vdcs.length && !policy.allowDelegation) {
+  const delegationAllowed = !!policy.allowDelegation;
+  if (vdcs.length && !delegationAllowed) {
     explanation.push('Delegations in this presentation were ignored because this gate does not accept them.');
-  } else if (vdcGrants.length && required.length) {
-    principal = checkDelegation(vdcGrants, vdcAcceptances, required, ctx);
-    result.delegatedFor = principal;
   }
 
-  // ── 4. authorities ───────────────────────────────────────────────────────────────────────────────
   const vacs = creds.filter((vc) => isType(vc, 'AuthorityCredential'));
   const byDigest = new Map<string, VerifiableCredential>();
   for (const vc of vacs) byDigest.set(digestMultibase(vc), vc);
   const podOk = (issuer: string) => (pod ? issuer === pod : acceptedSet.has(issuer));
+  const isPodScope = (scope: unknown) => typeof scope === 'string' && (pod ? scope === pod : acceptedSet.has(scope));
 
-  const subjects = new Set([holder, ...(principal ? [principal] : [])]);
-  for (const scope of required) {
-    const actor = principal ?? holder;
+  /** First valid VAC of `subject` for the requirement, or the first problem, or nothing. */
+  const findAuthority = (subject: string, req: { action: string; scope?: string }) => {
     const candidates = vacs.filter((vc) => {
       const a = vc.credentialSubject?.['authority'];
-      if (vc.credentialSubject?.id !== actor || !a || !Array.isArray(a.actions) || !a.actions.includes(scope)) return false;
-      if (scope === 'pay:receive') return true; // enterprise scope; any named scope is reported
-      return pod ? a.scope === pod : acceptedSet.has(a.scope);
+      if (vc.credentialSubject?.id !== subject || !a || !Array.isArray(a.actions) || !a.actions.includes(req.action)) return false;
+      return req.scope ? a.scope === req.scope : isPodScope(a.scope);
     });
-    if (!candidates.length) {
-      const whom = principal ? `${friendlyDid(principal)} (on whose behalf you act)` : 'you';
-      throw new Refusal('MISSING_AUTHORITY', `No authority credential in this presentation gives ${whom} the right to ${scope}.`);
-    }
-    let firstProblem: Refusal | undefined;
-    let satisfied = false;
+    let problem: Refusal | undefined;
     for (const vc of candidates) {
-      const problem = authorityProblem(vc, byDigest, podOk, ctx);
-      if (!problem) {
-        satisfied = true;
-        const a = vc.credentialSubject['authority'];
-        const until = day(vc.validUntil);
-        if (scope === 'pay:receive') {
-          explanation.push(`Authority to receive payments at ${friendlyDid(a.scope)} is valid until ${until}.`);
-        } else {
-          explanation.push(`Authority ${scope} is valid until ${until}${principal ? `, held by ${friendlyDid(principal)} and exercised by delegation` : ''}.`);
-        }
-        break;
-      }
-      firstProblem ??= problem;
+      const p = authorityProblem(vc, byDigest, podOk, ctx);
+      if (!p) return { vc };
+      problem ??= p;
     }
-    if (!satisfied) throw firstProblem!;
-  }
+    return { problem };
+  };
 
-  // Collect all actions and the tier across valid VACs held by the subject(s).
+  const describe = (vc: VerifiableCredential, action: string, via?: string): string => {
+    const a = vc.credentialSubject['authority'];
+    const until = day(vc.validUntil);
+    if (action === 'pay:receive') return `Authority to receive payments at ${friendlyDid(a.scope)} is valid until ${until}.`;
+    const where = isPodScope(a.scope) ? '' : ` at ${friendlyDid(a.scope)}`;
+    return `Authority ${action}${where} is valid until ${until}${via ? `, held by ${friendlyDid(via)} and exercised by delegation` : ''}.`;
+  };
+
+  let principal: string | undefined;
+  let delegatedScope: Set<string> | undefined;
+  for (const req of required) {
+    if (req.action === 'pay:receive' && !req.scope) throw new Refusal('MISSING_AUTHORITY', PAY_RECEIVE_UNSCOPED);
+    const own = findAuthority(holder, req);
+    if (own.vc) {
+      explanation.push(describe(own.vc, req.action));
+      continue;
+    }
+    const chain = delegationAllowed ? delegationChainFor(vdcGrants, req.action, ctx) : undefined;
+    if (!chain) {
+      throw own.problem ?? new Refusal('MISSING_AUTHORITY', `No authority credential in this presentation gives you the right to ${req.entry}.`);
+    }
+    const via = checkDelegation(chain, vdcAcceptances, req.action, ctx);
+    if (principal && principal !== via.principal) {
+      throw new Refusal('MISSING_AUTHORITY', 'This presentation mixes delegations from different groups, so it was refused.');
+    }
+    if (!principal) {
+      principal = via.principal;
+      delegatedScope = via.scope;
+    } else delegatedScope = new Set([...delegatedScope!].filter((x) => via.scope.has(x)));
+    const theirs = findAuthority(principal, req);
+    if (!theirs.vc) {
+      throw theirs.problem ?? new Refusal('MISSING_AUTHORITY', `No authority credential in this presentation gives ${friendlyDid(principal)} (on whose behalf you act) the right to ${req.entry}.`);
+    }
+    explanation.push(describe(theirs.vc, req.action, principal));
+  }
+  if (principal) result.delegatedFor = principal;
+
+  // Collect actions: the holder's own valid VACs, plus the principal's actions narrowed to the delegated scope.
+  // Actions scoped to something other than the pod are reported as `action@<scopeDid>`.
   const actions = new Set<string>();
   let tier: Tier | undefined;
   for (const vc of vacs) {
-    if (!subjects.has(vc.credentialSubject?.id)) continue;
+    const subject = vc.credentialSubject?.id;
+    if (subject !== holder && subject !== principal) continue;
     if (authorityProblem(vc, byDigest, podOk, ctx)) continue;
     const a = vc.credentialSubject['authority'];
-    for (const act of a.actions as string[]) actions.add(act);
+    for (const act of a.actions as string[]) {
+      if (subject !== holder && !delegatedScope!.has(act)) continue;
+      actions.add(isPodScope(a.scope) ? act : `${act}@${a.scope}`);
+    }
     const t = vc.credentialSubject['tier'];
-    if (!a.parent && vc.credentialSubject.id === holder && typeof t === 'string' && (TIERS as readonly string[]).includes(t)) {
+    if (!a.parent && subject === holder && typeof t === 'string' && (TIERS as readonly string[]).includes(t)) {
       if (!tier || tierRank(t as Tier) > tierRank(tier)) tier = t as Tier;
     }
   }
@@ -292,7 +360,13 @@ async function run(vp: VerifiablePresentation, policy: VerifyPolicy, deps: Verif
           unchecked = true;
           continue;
         }
-        if (await isRevoked(entry, deps.statusFetch)) {
+        let revoked: boolean;
+        try {
+          revoked = await isRevoked(entry, deps.statusFetch);
+        } catch {
+          throw new Refusal('UPSTREAM_UNAVAILABLE', 'The credential status list could not be checked right now, so this gate cannot decide.');
+        }
+        if (revoked) {
           const label = vc.type.find((t) => t !== 'VerifiableCredential') ?? 'credential';
           throw new Refusal('EXPIRED', `This ${label} was revoked by its issuer.`);
         }
@@ -357,23 +431,29 @@ function checkMembership(creds: VerifiableCredential[], accepted: Set<string>, c
 
 const lowerFirst = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
 
-/** Checks every delegation needed for `required`; returns the principal (group DID). */
-function checkDelegation(vdcs: VerifiableCredential[], acceptances: VerifiableCredential[], required: string[], ctx: Ctx): string {
-  // Walk backwards from the holder: actor ← steward ← … ← group.
+/** Rebuilds group → … → holder for `action`, walking backwards from the holder. Undefined when no hop reaches the holder. */
+function delegationChainFor(grants: VerifiableCredential[], action: string, ctx: Ctx): VerifiableCredential[] | undefined {
   const chain: VerifiableCredential[] = [];
   let cursor = ctx.holder;
-  const seen = new Set<VerifiableCredential>();
   for (;;) {
-    const hop = vdcs.find((vc) => vc.credentialSubject?.id === cursor && !seen.has(vc));
+    const hop = grants.find(
+      (vc) => vc.credentialSubject?.id === cursor && !chain.includes(vc) && vc.credentialSubject['delegation'].scope.includes(action),
+    );
     if (!hop) break;
-    seen.add(hop);
     chain.unshift(hop);
     cursor = hop.issuer;
-    if (chain.length > vdcs.length) break;
+    if (chain.length > grants.length) break;
   }
-  if (!chain.length) {
-    throw new Refusal('MISSING_AUTHORITY', 'The delegations in this presentation were not given to you.');
-  }
+  return chain.length ? chain : undefined;
+}
+
+/** Checks one delegation chain for `action`; returns its principal and the scope every hop grants. */
+function checkDelegation(
+  chain: VerifiableCredential[],
+  acceptances: VerifiableCredential[],
+  action: string,
+  ctx: Ctx,
+): { principal: string; scope: Set<string> } {
   const group = chain[0]!.issuer;
   // Depth first, so an over-long chain is reported as such.
   for (const [i, hop] of chain.entries()) {
@@ -386,16 +466,20 @@ function checkDelegation(vdcs: VerifiableCredential[], acceptances: VerifiableCr
       );
     }
   }
-  for (const scope of required) {
-    const r = checkDelegationChain(chain, { actor: ctx.holder, requiredScope: scope, acceptances, now: new Date(ctx.now) });
-    if (!r.ok) {
-      const reason = r.reason ?? '';
-      const code: VerifyErrorCode = /depth|deeper/.test(reason) ? 'CHAIN_TOO_DEEP' : /expired|not valid yet/.test(reason) ? 'EXPIRED' : 'MISSING_AUTHORITY';
-      throw new Refusal(code, `The delegation from ${friendlyDid(group)} does not let you ${scope}: ${lowerFirst(r.reason ?? 'unknown reason')}`);
-    }
+  const r = checkDelegationChain(chain, { actor: ctx.holder, requiredScope: action, acceptances, now: new Date(ctx.now) });
+  if (!r.ok) {
+    const reason = r.reason ?? '';
+    const code: VerifyErrorCode = /depth|deeper/.test(reason) ? 'CHAIN_TOO_DEEP' : /expired|not valid yet/.test(reason) ? 'EXPIRED' : 'MISSING_AUTHORITY';
+    throw new Refusal(code, `The delegation from ${friendlyDid(group)} does not let you ${action}: ${lowerFirst(reason || 'unknown reason')}`);
   }
-  ctx.explanation.push(`You act for ${friendlyDid(group)} through a delegation of ${chain.length} hop${chain.length === 1 ? '' : 's'}.`);
-  return group;
+  let scope = new Set<string>(chain[0]!.credentialSubject['delegation'].scope as string[]);
+  for (const hop of chain.slice(1)) {
+    const hs = hop.credentialSubject['delegation'].scope as string[];
+    scope = new Set([...scope].filter((x) => hs.includes(x)));
+  }
+  const line = `You act for ${friendlyDid(group)} through a delegation of ${chain.length} hop${chain.length === 1 ? '' : 's'}.`;
+  if (!ctx.explanation.includes(line)) ctx.explanation.push(line);
+  return { principal: group, scope };
 }
 
 /**

@@ -5,6 +5,7 @@ export {
   type VerifyResult,
   type VerifyDeps,
   verifyDTG,
+  parseAuthorityRequirement,
 } from './verify.js';
 export { type SessionClaims, createSession, readSession } from './session.js';
 export { policyFromRequirements } from './policy.js';

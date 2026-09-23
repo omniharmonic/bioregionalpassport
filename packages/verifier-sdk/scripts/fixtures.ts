@@ -39,6 +39,7 @@ export const BOULDER = web('boulder');
 export const TENANT_ZERO = web('tenant-zero');
 export const GARDEN_GROUP = web('garden-collective');
 export const ENTERPRISE = web('moxie-bread');
+export const OTHER_ENTERPRISE = web('ozo-coffee');
 
 export const keys = {
   boulder: keyPairForDid(BOULDER, seed(1)),
@@ -126,8 +127,8 @@ export function delegationHop(from: KeyPair, to: KeyPair, scope: string[], maxDe
 }
 
 /** Owner pay:receive VAC for the enterprise, attenuated (properly) to staff. */
-export function payReceiveChain(owner: KeyPair, staff: KeyPair): { root: VerifiableCredential; child: VerifiableCredential } {
-  const root = vac(keys.boulder, owner.did, ['pay:receive'], { scope: ENTERPRISE });
+export function payReceiveChain(owner: KeyPair, staff: KeyPair, enterprise = ENTERPRISE): { root: VerifiableCredential; child: VerifiableCredential } {
+  const root = vac(keys.boulder, owner.did, ['pay:receive'], { scope: enterprise });
   const child = sign(attenuate(root, { issuerKey: owner, subject: staff.did, actions: ['pay:receive'], validFrom: FROM, validUntil: STAFF_UNTIL }), owner);
   return { root, child };
 }

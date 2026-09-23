@@ -158,7 +158,7 @@
     ],
     "requireMembership": true,
     "requireAuthority": [
-      "pay:receive"
+      "pay:receive@did:web:bioregionalpassport.org:dids:moxie-bread"
     ],
     "maxClockSkewSec": 300,
     "statusCheck": "ifPresent",

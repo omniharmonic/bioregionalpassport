@@ -33,8 +33,15 @@ function subtle(): SubtleCrypto {
   return s;
 }
 
+const MIN_SECRET_BYTES = 32;
+
+function assertSecret(secret: string): void {
+  if (typeof secret !== 'string' || enc.encode(secret).length < MIN_SECRET_BYTES) {
+    throw new Error(`The session secret must be at least ${MIN_SECRET_BYTES} bytes.`);
+  }
+}
+
 async function hmac(secret: string, data: string): Promise<Uint8Array> {
-  if (!secret) throw new Error('A session secret is required.');
   const key = await subtle().importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return new Uint8Array(await subtle().sign('HMAC', key, enc.encode(data)));
 }
@@ -50,9 +57,11 @@ const b64json = (o: unknown) => base64urlnopad.encode(enc.encode(JSON.stringify(
 
 /**
  * Compact HMAC-SHA-256 token `base64url(header).base64url(payload).base64url(sig)` (JWT HS256 shape) for a
- * successful verification. Browser-safe (WebCrypto). Throws if `result.ok` is false.
+ * successful verification. Browser-safe (WebCrypto). Throws if `result.ok` is false or the secret is shorter
+ * than 32 bytes.
  */
 export async function createSession(result: VerifyResult, secret: string, ttlSec = 3600, now: Date = new Date()): Promise<string> {
+  assertSecret(secret);
   if (!result.ok || !result.subject) throw new Error('Only a successful verification can open a session.');
   if (!(ttlSec > 0)) throw new Error('Session lifetime must be positive.');
   const iat = Math.floor(now.getTime() / 1000);
@@ -69,8 +78,9 @@ export async function createSession(result: VerifyResult, secret: string, ttlSec
   return `${signingInput}.${base64urlnopad.encode(await hmac(secret, signingInput))}`;
 }
 
-/** Verify a session token's HMAC (constant-time) and expiry. Returns its claims, or null. */
+/** Verify a session token's HMAC (constant-time) and expiry. Returns its claims, or null. Throws only for a secret shorter than 32 bytes. */
 export async function readSession(token: string, secret: string, now: Date = new Date()): Promise<SessionClaims | null> {
+  assertSecret(secret);
   try {
     if (typeof token !== 'string') return null;
     const parts = token.split('.');
@@ -81,7 +91,9 @@ export async function readSession(token: string, secret: string, now: Date = new
     const header = JSON.parse(dec.decode(base64urlnopad.decode(h)));
     if (header?.alg !== HEADER.alg) return null;
     const payload = JSON.parse(dec.decode(base64urlnopad.decode(p))) as Payload;
-    if (typeof payload?.sub !== 'string' || typeof payload.exp !== 'number' || !Array.isArray(payload.authorities)) return null;
+    if (typeof payload?.sub !== 'string' || !Array.isArray(payload.authorities)) return null;
+    if (!Number.isInteger(payload.iat) || !Number.isInteger(payload.exp) || payload.exp <= payload.iat) return null;
+    if (!payload.authorities.every((a) => typeof a === 'string')) return null;
     if (Math.floor(now.getTime() / 1000) >= payload.exp) return null;
     return {
       subject: payload.sub,

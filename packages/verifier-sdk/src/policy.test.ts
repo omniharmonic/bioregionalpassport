@@ -21,6 +21,13 @@ describe('policyFromRequirements', () => {
     });
   });
 
+  it('supports enterprise-scoped requirements and refuses bare pay:receive', () => {
+    const shop = 'did:web:bioregionalpassport.org:dids:moxie-bread';
+    expect(policyFromRequirements([`AuthorityCredential:pay:receive@${shop}`], POD).requireAuthority).toEqual([`pay:receive@${shop}`]);
+    expect(() => policyFromRequirements(['AuthorityCredential:pay:receive'], POD)).toThrow(/enterprise/);
+    expect(() => policyFromRequirements(['AuthorityCredential:pay:receive@nobody'], POD)).toThrow(/Invalid scoped/);
+  });
+
   it('rejects unknown types and scopes', () => {
     expect(() => policyFromRequirements(['AuthorityCredential:launch:rockets'], POD)).toThrow(/Unknown authority scope/);
     expect(() => policyFromRequirements(['PassportCredential:pod'], POD)).toThrow(/Unsupported/);
