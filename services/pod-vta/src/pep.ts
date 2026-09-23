@@ -189,6 +189,25 @@ export async function refreshAuthorities(ctx: VtaContext, deps: Pick<PodVtaDeps,
     held = heldOf(valid);
   }
 
+  // Immediate downgrades also cover actions: a VAC carrying actions its tier no longer grants under the current
+  // policy (e.g. `vwc:issue` at T2 after `admission.witnessTier` was raised above T2) is revoked here and
+  // re-issued below with the policy's action set. With downgradeAtExpiryOnly it stays valid until it expires.
+  if (!atExpiryOnly) {
+    const excess = valid.filter((r) => {
+      if (!isTier(r.tier)) return false;
+      const allowed = tierActions(ctx, r.tier);
+      return (json<string[]>(r.actions) ?? []).some((a) => !allowed.includes(a as AuthorityScope));
+    });
+    for (const r of excess) {
+      await ctx.db.query('UPDATE vac_issuance_log SET revoked_at = $2 WHERE id = $1', [r.id, ctx.now().toISOString()]);
+    }
+    if (excess.length) {
+      explanation.push('Authorities this pod\'s policy no longer grants at your tier were withdrawn, because this pod applies downgrades immediately.');
+      valid = valid.filter((r) => !excess.includes(r));
+      held = heldOf(valid);
+    }
+  }
+
   const tier = maxTier(held, entitled);
   if (tierRank(held) > tierRank(entitled)) {
     const top = valid.find((r) => r.tier === held)!;

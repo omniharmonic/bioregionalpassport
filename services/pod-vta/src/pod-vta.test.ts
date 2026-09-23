@@ -22,8 +22,8 @@ import { bitAt, decodeEncodedList, readSession } from '@passport/verifier-sdk';
 import { tierDefaultActions, type Tier } from '@passport/vocab';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootstrapSteward, ceremonyBackHalf } from './ceremony.js';
-import { issueAuthorities, recordGovernanceTier, tierActions } from './pep.js';
-import { witnessVolume } from './events.js';
+import { issueAuthorities, recordGovernanceTier, tierActions, validVacs } from './pep.js';
+import { currentTier, witnessMeeting, witnessVolume } from './events.js';
 import { edgePairDigest } from './edges.js';
 import { DbChallengeStore, MemoryChallengeStore } from './challenges.js';
 import { createPodVtaRoutes } from './routes.js';
@@ -919,12 +919,12 @@ describe('pod VTA — peer witnessing: meetings as Trust Tasks (Task 21a)', () =
     edge12 = relationship(p1, p2);
     const res = await call('POST', '/witness', {
       session: wSession,
-      body: { vrcA: edge12.vrcA, vrcB: edge12.vrcB, evidence: 'same-event', place: { placeId: 'huc12:101900050301', lat: 40.02, lon: -105.28, name: 'Farmers market' } },
+      body: { vrcA: edge12.vrcA, vrcB: edge12.vrcB, evidence: 'liveness', place: { placeId: 'huc12:101900050301', lat: 40.02, lon: -105.28, name: 'Farmers market' } },
     });
     expect(res.status).toBe(201);
     vwc12 = res.body.vwc;
     task = res.body.task;
-    expect(task.id).toMatch(/^meet-[2-7a-z]{13}$/);
+    expect(task.id).toMatch(/^meet-[A-Za-z0-9_-]{16}$/);
     expect(task.kind).toBe('meeting');
     expect(task.title).toMatch(/^Meeting witnessed by did:key:/);
     expect(task.title.length).toBeLessThan(w.did.length + 25);
@@ -957,7 +957,7 @@ describe('pod VTA — peer witnessing: meetings as Trust Tasks (Task 21a)', () =
     expect(again.body.task.id).toBe(task.id);
     expect(digestMultibase(again.body.vwc)).toBe(digestMultibase(vwc12));
     expect(await count()).toBe(before);
-    const other = await call('POST', '/witness', { session: stewardSession, body: { vrcA: edge12.vrcA, vrcB: edge12.vrcB, evidence: 'same-event' } });
+    const other = await call('POST', '/witness', { session: stewardSession, body: { vrcA: edge12.vrcA, vrcB: edge12.vrcB, evidence: 'liveness' } });
     expect(other.status).toBe(409);
     expect(other.body.code).toBe('ALREADY_WITNESSED');
     // And at a scheduled event too.
@@ -968,14 +968,18 @@ describe('pod VTA — peer witnessing: meetings as Trust Tasks (Task 21a)', () =
 
   it('refuses self-witness and a malformed pair at /witness', async () => {
     const own = relationship(w, p3);
-    const self = await call('POST', '/witness', { session: wSession, body: { vrcA: own.vrcA, vrcB: own.vrcB, evidence: 'same-event' } });
+    const self = await call('POST', '/witness', { session: wSession, body: { vrcA: own.vrcA, vrcB: own.vrcB, evidence: 'liveness' } });
     expect(self.status).toBe(403);
     expect(self.body.code).toBe('SELF_WITNESS');
-    const half = await call('POST', '/witness', { session: wSession, body: { vrcA: own.vrcA, evidence: 'same-event' } });
+    const half = await call('POST', '/witness', { session: wSession, body: { vrcA: own.vrcA, evidence: 'liveness' } });
     expect(half.status).toBe(400);
     expect(half.body.code).toBe('BAD_PAIR');
-    const badPlace = await call('POST', '/witness', { session: wSession, body: { ...relationship(p3, p4), evidence: 'same-event', place: { lat: 200 } } });
+    const badPlace = await call('POST', '/witness', { session: wSession, body: { ...relationship(p3, p4), evidence: 'liveness', place: { lat: 200 } } });
     expect(badPlace.status).toBe(400);
+    // No scheduled gathering, so no same-event evidence: the witness saw both people live.
+    const sameEvent = await call('POST', '/witness', { session: wSession, body: { ...relationship(p3, p4), evidence: 'same-event' } });
+    expect(sameEvent.status).toBe(400);
+    expect(sameEvent.body.message).toMatch(/liveness/);
   });
 
   it('both parties apply with the meeting VWC and are admitted at T1', async () => {
@@ -1002,13 +1006,18 @@ describe('pod VTA — peer witnessing: meetings as Trust Tasks (Task 21a)', () =
     const still = await apply(p3, res.body.vwc, e.both, pT3);
     expect(still.status).toBe(403);
     await run((ctx) => recordGovernanceTier(ctx, w.did, 'T2', 'operator', 'term ended'));
+    // Refs that predate migration 0011 carry 'legacy': for those only, the witness's CURRENT tier counts.
+    const digest = digestMultibase(res.body.vwc);
+    await run((ctx) => ctx.db.query(`UPDATE witness_refs SET witness_tier = 'legacy' WHERE digest = $1`, [digest]));
+    expect((await apply(p3, res.body.vwc, e.both, pT3)).status).toBe(403);
+    await run((ctx) => ctx.db.query(`UPDATE witness_refs SET witness_tier = 'T2' WHERE digest = $1`, [digest]));
     // Under a T2 (or unset) witness tier the same VWC admits.
     await admit(p3, res.body.vwc, e.both, pT2);
   });
 
   it('a T1 member without vwc:issue cannot witness', async () => {
     const e = relationship(generateKeyPair(), generateKeyPair());
-    const res = await call('POST', '/witness', { session: sessionOf(p1.did, 'T1'), body: { vrcA: e.vrcA, vrcB: e.vrcB, evidence: 'same-event' } });
+    const res = await call('POST', '/witness', { session: sessionOf(p1.did, 'T1'), body: { vrcA: e.vrcA, vrcB: e.vrcB, evidence: 'liveness' } });
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('MISSING_AUTHORITY');
     // Even under a permissive policy T1 gains nothing.
@@ -1031,8 +1040,20 @@ describe('pod VTA — peer witnessing: meetings as Trust Tasks (Task 21a)', () =
     expect(meetings.map((e) => e.id)).toContain(task.id);
     expect(meetings.every((e) => e.kind === 'meeting')).toBe(true);
     expect((await call('GET', '/events?kind=party')).status).toBe(400);
-    // A meeting is still readable by id (a VWC names it as its task context).
-    expect((await call('GET', `/events/${task.id}`)).body.kind).toBe('meeting');
+    // A meeting is readable by id (a VWC names it as its task context), but only in summary for outsiders.
+    const summary = { id: task.id, kind: 'meeting', startsAt: task.startsAt, endsAt: task.endsAt, taskDigest: task.taskDigest };
+    expect((await call('GET', `/events/${task.id}`)).body).toEqual(summary);
+    expect((await call('GET', `/events/${task.id}`, { session: sessionOf(p3.did, 'T1') })).body).toEqual(summary);
+    // Full view: stewards, the witness (convener), and either party — even on a holder-only visitor session.
+    for (const viewer of [stewardSession, wSession, sessionOf(p1.did, 'T1'), { subject: p2.did, tier: 'T0', authorities: [] } as unknown as SessionClaims]) {
+      const full = await call('GET', `/events/${task.id}`, { session: viewer });
+      expect(full.body.conveners).toEqual([w.did]);
+      expect(full.body.taskDocument.kind).toBe('meeting');
+    }
+    // A steward session from another pod is an outsider here.
+    expect((await call('GET', `/events/${task.id}`, { session: { ...stewardSession, pod: OTHER_POD } })).body).toEqual(summary);
+    // Scheduled events stay fully public.
+    expect((await call('GET', `/events/${gathering.id}`)).body.conveners).toEqual([steward.did]);
   });
 
   it('GET /steward/witnesses reports witness volume; witnessVolume windows by days', async () => {
@@ -1044,10 +1065,110 @@ describe('pod VTA — peer witnessing: meetings as Trust Tasks (Task 21a)', () =
     expect(st.atEvents).toBeGreaterThanOrEqual(1);
     expect((await call('GET', '/steward/witnesses', { session: wSession })).status).toBe(403);
     expect((await call('GET', '/steward/witnesses?sinceDays=-1', { session: stewardSession })).status).toBe(400);
+    expect((await call('GET', '/steward/witnesses?sinceDays=36501', { session: stewardSession })).status).toBe(400);
+    expect((await call('GET', '/steward/witnesses?sinceDays=36500', { session: stewardSession })).status).toBe(200);
+    await expect(run((ctx) => witnessVolume(ctx, 40_000))).rejects.toThrow(/sinceDays/);
     const later = new Date(NOW.getTime() + 10 * DAY);
     const recent = await run((ctx) => witnessVolume(ctx, 5), later);
     expect(recent.find((x) => x.witness === w.did)).toBeUndefined();
     const wide = await run((ctx) => witnessVolume(ctx, 30), later);
     expect(wide.find((x) => x.witness === w.did)?.pairs).toBe(2);
   });
+
+  it('records the witness tier with an expired effective tier ignored, and T0 for a non-member', async () => {
+    const x = generateKeyPair();
+    const a = generateKeyPair();
+    const b = generateKeyPair();
+    // Governance T1; a T3 effective tier that expired yesterday; a VAC that still carries vwc:issue.
+    await run(async (ctx) => {
+      await ctx.db.query(
+        `INSERT INTO members (did, tier, effective_tier, effective_until, joined_at) VALUES ($1, 'T1', 'T3', $2, $3)`,
+        [x.did, new Date(NOW.getTime() - DAY).toISOString(), NOW.toISOString()],
+      );
+      await issueAuthorities(ctx, deps, x.did, 'T3', ['test: stale steward']);
+    });
+    expect(await run((ctx) => currentTier(ctx, x.did))).toBe('T1');
+    const e = relationship(a, b);
+    const xSession = { subject: x.did, pod: POD_DID, tier: 'T3', authorities: tierDefaultActions('T3') } as SessionClaims;
+    const res = await call('POST', '/witness', { session: xSession, body: { vrcA: e.vrcA, vrcB: e.vrcB, evidence: 'liveness' } });
+    expect(res.status).toBe(201);
+    const [ref] = await run((ctx) => ctx.db.query('SELECT witness_tier FROM witness_refs WHERE digest = $1', [digestMultibase(res.body.vwc)]));
+    expect(ref.witness_tier).toBe('T1');
+    const refused = await apply(a, res.body.vwc, e.both, pT2);
+    expect(refused.status).toBe(403);
+    expect(refused.body.code).toBe('WITNESS_INVALID');
+    // While the effective tier is current it counts.
+    await run((ctx) => ctx.db.query('UPDATE members SET effective_until = $2 WHERE did = $1', [x.did, new Date(NOW.getTime() + DAY).toISOString()]));
+    expect(await run((ctx) => currentTier(ctx, x.did))).toBe('T3');
+    // A session holder with no members row records T0, whatever the session claims.
+    const stranger = generateKeyPair();
+    const e2 = relationship(generateKeyPair(), generateKeyPair());
+    const res2 = await call('POST', '/witness', {
+      session: { subject: stranger.did, pod: POD_DID, tier: 'T3', authorities: ['vwc:issue'] } as SessionClaims,
+      body: { vrcA: e2.vrcA, vrcB: e2.vrcB, evidence: 'liveness' },
+    });
+    expect(res2.status).toBe(201);
+    const [ref2] = await run((ctx) => ctx.db.query('SELECT witness_tier FROM witness_refs WHERE digest = $1', [digestMultibase(res2.body.vwc)]));
+    expect(ref2.witness_tier).toBe('T0');
+    expect(await run((ctx) => currentTier(ctx, stranger.did))).toBe('T0');
+  });
+
+  it('a concurrent re-post by the same witness leaves no orphan meeting and returns the stored task', async () => {
+    const e = relationship(generateKeyPair(), generateKeyPair());
+    const first = await call('POST', '/witness', { session: wSession, body: { vrcA: e.vrcA, vrcB: e.vrcB, evidence: 'liveness' } });
+    expect(first.status).toBe(201);
+    const meetings = async () => Number((await run((ctx) => ctx.db.query(`SELECT COUNT(*) AS n FROM events WHERE kind = 'meeting'`)))[0].n);
+    const before = await meetings();
+    // Simulate the race: this request's pre-check runs before the other request's witness_refs row is visible.
+    const out = await run(async (ctx) => {
+      let hidden = false;
+      const racing: Db = Object.create(ctx.db);
+      racing.query = (async (text: string, params?: unknown[]) => {
+        if (!hidden && text.startsWith('SELECT digest, convener_did FROM witness_refs')) {
+          hidden = true;
+          return [];
+        }
+        return ctx.db.query(text, params);
+      }) as Db['query'];
+      return witnessMeeting({ ...ctx, db: racing }, deps, w.did, { vrcA: e.vrcB, vrcB: e.vrcA, evidence: 'liveness' });
+    });
+    expect(out.existing).toBe(true);
+    expect(out.task.id).toBe(first.body.task.id);
+    expect(digestMultibase(out.vwc)).toBe(digestMultibase(first.body.vwc));
+    expect(await meetings()).toBe(before);
+  });
+
+  it('events.kind is constrained to event or meeting', async () => {
+    await expect(
+      run((ctx) => ctx.db.query(`INSERT INTO events (id, title, kind) VALUES ('evt_badkind', 'x', 'party')`)),
+    ).rejects.toThrow();
+    const [row] = await run((ctx) => ctx.db.query(`INSERT INTO events (id, title) VALUES ('evt_defaultkind', 'x') RETURNING kind`));
+    expect(row.kind).toBe('event');
+    await run((ctx) => ctx.db.query(`DELETE FROM events WHERE id = 'evt_defaultkind'`));
+  });
+
+  it('with immediate downgrades, a VAC carrying actions its tier no longer grants is revoked and re-issued', async () => {
+    const immediate = { ...policy, downgradeAtExpiryOnly: false } as TrustPolicy;
+    const before = await run((ctx) => validVacs(ctx, w.did));
+    const withWitness = before.filter((r: any) => JSON.stringify(r.actions).includes('vwc:issue'));
+    expect(withWitness.length).toBeGreaterThan(0);
+    // At-expiry policy (the default) keeps it until it expires.
+    const lazy = await call('POST', '/authority/refresh', { session: wSession });
+    expect(lazy.body.vacs.some((c: any) => c.credentialSubject.authority.actions.includes('vwc:issue'))).toBe(true);
+    // Leave only the VAC with vwc:issue valid, so the refresh must re-issue after revoking it.
+    const plainIds = before.filter((r: any) => !withWitness.includes(r)).map((r: any) => r.id);
+    if (plainIds.length) {
+      await run((ctx) => ctx.db.query('UPDATE vac_issuance_log SET revoked_at = $2 WHERE id = ANY($1::bigint[])', [plainIds, NOW.toISOString()]));
+    }
+    const res = await call('POST', '/authority/refresh', { session: wSession, policy: immediate });
+    expect(res.status).toBe(200);
+    expect(res.body.tier).toBe('T2');
+    expect(res.body.issued).toBe(true);
+    expect(res.body.vacs).toHaveLength(1);
+    for (const c of res.body.vacs) expect(c.credentialSubject.authority.actions).not.toContain('vwc:issue');
+    expect(res.body.explanation.join(' ')).toMatch(/no longer grants/);
+    const revoked = await run((ctx) => ctx.db.query('SELECT revoked_at FROM vac_issuance_log WHERE id = $1', [withWitness[0]!.id]));
+    expect(revoked[0].revoked_at).not.toBeNull();
+  });
 });
+

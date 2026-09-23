@@ -33,6 +33,9 @@ export {
   createEvent,
   listEvents,
   getEvent,
+  getEventFor,
+  currentTier,
+  MAX_SINCE_DAYS,
   witnessEdge,
   witnessMeeting,
   witnessVolume,
@@ -43,6 +46,7 @@ export {
   type EventKind,
   type MeetingPlace,
   type WitnessVolume,
+  type MeetingSummary,
 } from './events.js';
 export { applyMembership, acknowledgeMembership, checkWitness, listMembers, getMember, type AckResult, type WitnessCheck } from './membership.js';
 export { RELAY_MAX_PER_CHANNEL, RelayStore, defaultRelayStore, relayAppend, relayList, CHANNEL_RE, RELAY_TTL_MS, type RelayMessage } from './relay.js';

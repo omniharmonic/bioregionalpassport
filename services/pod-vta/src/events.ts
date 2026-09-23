@@ -4,7 +4,7 @@ import { ServiceError } from '@passport/service-kit';
 import { checkVrcPair } from './edges.js';
 import type { PodVtaDeps, VtaContext } from './types.js';
 import { TIERS, type Tier } from '@passport/vocab';
-import { addDays, bad, isObject, json, tid, toIso, toMs } from './util.js';
+import { addDays, bad, isObject, json, toIso, toMs } from './util.js';
 
 export const WITNESS_VALIDITY_DAYS = 365;
 export const SMOKE_PREFIX = 'smoke-';
@@ -219,10 +219,32 @@ function refuseSelfWitness(req: WitnessRequest, witness: string, role: 'convener
   }
 }
 
-/** The witness's governance-or-effective tier right now (`GREATEST(tier, effective_tier)`), or null for a non-member. */
-async function witnessTierNow(ctx: VtaContext, witness: string): Promise<Tier | null> {
-  const [row] = await ctx.db.query<{ t: string | null }>('SELECT GREATEST(tier, effective_tier) AS t FROM members WHERE did = $1', [witness]);
-  return row?.t && (TIERS as readonly string[]).includes(row.t) ? (row.t as Tier) : null;
+const isTier = (t: unknown): t is Tier => typeof t === 'string' && (TIERS as readonly string[]).includes(t);
+const minTier = (a: Tier, b: Tier): Tier => (TIERS.indexOf(a) <= TIERS.indexOf(b) ? a : b);
+
+/**
+ * A DID's tier in this pod right now: the governance tier, raised by the PEP's effective tier only while that is
+ * current (`effective_until` unset or in the future). 'T0' for a DID with no `members` row.
+ */
+export async function currentTier(ctx: VtaContext, did: string): Promise<Tier> {
+  const [row] = await ctx.db.query<{ t: string | null }>(
+    `SELECT GREATEST(tier, CASE WHEN effective_until IS NULL OR effective_until > $2 THEN effective_tier END) AS t
+       FROM members WHERE did = $1`,
+    [did, ctx.now().toISOString()],
+  );
+  return isTier(row?.t) ? row.t : 'T0';
+}
+
+/**
+ * The tier recorded as the witness's tier at witness time (`witness_refs.witness_tier`, migration 0011): the
+ * session tier that carried `vwc:issue` (the PEP's current effective tier, else the VAC's tier — see
+ * routes.ts#openSession), capped by the witness's current tier in `members` so a session minted before a
+ * demotion cannot claim more than the pod now records. Without a session tier (in-process ceremony), the
+ * current `members` tier. A non-member records 'T0'.
+ */
+async function witnessTierAt(ctx: VtaContext, witness: string, sessionTier: unknown): Promise<Tier> {
+  const now = await currentTier(ctx, witness);
+  return isTier(sessionTier) ? minTier(sessionTier, now) : now;
 }
 
 /**
@@ -236,6 +258,7 @@ async function issueWitness(
   witness: string,
   row: EventRow,
   req: WitnessRequest,
+  sessionTier: unknown,
 ): Promise<{ vwc: VerifiableCredential; existing?: true }> {
   const now = ctx.now();
   const unsigned = buildWitness({
@@ -251,7 +274,7 @@ async function issueWitness(
   unsigned.credentialSubject['witnessedBy'] = witness;
   unsigned.credentialSubject['edgeParties'] = [req.pair.parties[0], req.pair.parties[1]];
   const vwc = deps.podSigner.sign(unsigned, { created: now.toISOString() });
-  const tier = await witnessTierNow(ctx, witness);
+  const tier = await witnessTierAt(ctx, witness, sessionTier);
   // The unique index on pair_digest (migration 0009_witness_pair.sql) also closes the race between two concurrent requests.
   const inserted = await ctx.db.query(
     `INSERT INTO witness_refs (digest, event_id, convener_did, created_at, pair_digest, witness_tier) VALUES ($1, $2, $3, $4, $5, $6)
@@ -289,6 +312,7 @@ export async function witnessEdge(
   convener: string,
   eventId: string,
   body: unknown,
+  opts: { sessionTier?: string } = {},
 ): Promise<{ vwc: VerifiableCredential; existing?: true }> {
   const req = await parseWitnessRequest(deps, body);
   const row = await getEventRow(ctx, eventId);
@@ -304,7 +328,7 @@ export async function witnessEdge(
   if (t < toMs(row.starts_at) - WITNESS_EARLY_MS || t > toMs(row.ends_at) + WITNESS_LATE_MS) {
     throw new ServiceError(409, 'EVENT_NOT_ACTIVE', 'Witnessing is only possible while the event is happening.');
   }
-  return issueWitness(ctx, deps, convener, row, req);
+  return issueWitness(ctx, deps, convener, row, req, opts.sessionTier);
 }
 
 export interface MeetingPlace {
@@ -345,7 +369,7 @@ export function abbreviateDid(did: string): string {
  */
 async function createMeeting(ctx: VtaContext, deps: Pick<PodVtaDeps, 'podSigner'>, witness: string, place: MeetingPlace): Promise<EventRow> {
   const now = ctx.now();
-  const id = `${MEETING_PREFIX}${tid(ctx.now)}`;
+  const id = `${MEETING_PREFIX}${randomNonce(12)}`;
   const title = `Meeting witnessed by ${abbreviateDid(witness)}`;
   const startsAt = now.toISOString();
   const endsAt = new Date(now.getTime() + MEETING_DURATION_MS).toISOString();
@@ -393,21 +417,79 @@ export async function witnessMeeting(
   deps: Pick<PodVtaDeps, 'podSigner' | 'resolver'>,
   witness: string,
   body: unknown,
+  opts: { sessionTier?: string } = {},
 ): Promise<{ vwc: VerifiableCredential; task: EventView; existing?: true }> {
+  // Without a scheduled gathering there is no "same event" to point to: the witness attests they saw both
+  // people, live, themselves.
+  if (isObject(body) && body['evidence'] === 'same-event') {
+    throw bad('BAD_REQUEST', 'A meeting witness must have seen both people in person, so evidence must be liveness; same-event applies only at a scheduled event.');
+  }
   const req = await parseWitnessRequest(deps, body);
   const place = parsePlace(isObject(body) ? body['place'] : undefined);
   refuseSelfWitness(req, witness, 'witness');
   const recovered = await existingWitness(ctx, req.pair.digest, witness);
-  if (recovered) {
-    const taskId = recovered.vwc.credentialSubject?.['taskContext'];
-    const taskRow = typeof taskId === 'string' ? await getEventRow(ctx, taskId) : undefined;
-    if (!taskRow) throw alreadyWitnessed();
-    return { ...recovered, task: eventView(taskRow, true) };
-  }
+  if (recovered) return { ...recovered, task: await taskOf(ctx, recovered.vwc) };
   const row = await createMeeting(ctx, deps, witness, place);
-  const out = await issueWitness(ctx, deps, witness, row, req);
+  const out = await issueWitness(ctx, deps, witness, row, req, opts.sessionTier);
+  if (out.existing) {
+    // Lost a race with the same witness's concurrent re-post: drop the meeting row made for this request (no
+    // witness_refs row points at it) and answer with the task the stored VWC is bound to.
+    await ctx.db.query(`DELETE FROM events WHERE id = $1 AND kind = 'meeting'`, [row.id]);
+    return { ...out, existing: true, task: await taskOf(ctx, out.vwc) };
+  }
   return { ...out, task: eventView(row, true) };
 }
+
+/** The Trust Task a stored VWC is bound to (`credentialSubject.taskContext`). */
+async function taskOf(ctx: VtaContext, vwc: VerifiableCredential): Promise<EventView> {
+  const taskId = vwc.credentialSubject?.['taskContext'];
+  const taskRow = typeof taskId === 'string' ? await getEventRow(ctx, taskId) : undefined;
+  if (!taskRow) throw alreadyWitnessed();
+  return eventView(taskRow, true);
+}
+
+/** The reduced view of a meeting shown to anyone but stewards and the meeting's own people. */
+export interface MeetingSummary {
+  id: string;
+  kind: 'meeting';
+  startsAt: string | null;
+  endsAt: string | null;
+  taskDigest: string | null;
+}
+
+/**
+ * `GET /events/:id`. Events are public. A meeting (who witnessed whom, where and when) is shown in full only to
+ * a session carrying `pep:review` for this pod, or to its convener (the witness) or one of the two people whose
+ * relationship it witnessed (any authenticated session subject, so a not-yet-admitted party can see it);
+ * everyone else gets `{ id, kind, startsAt, endsAt, taskDigest }` — enough to check a VWC's task binding.
+ */
+export async function getEventFor(
+  ctx: VtaContext,
+  id: string,
+  viewer: { subject?: string; pod?: string; authorities?: readonly string[] } | undefined,
+): Promise<EventView | MeetingSummary> {
+  const row = await getEventRow(ctx, id);
+  if (!row) throw new ServiceError(404, 'NOT_FOUND', 'There is no event with that id in this pod.');
+  if (row.kind !== 'meeting') return eventView(row, true);
+  const subject = viewer?.subject;
+  const steward = !!subject && viewer?.pod === ctx.podDid && !!viewer.authorities?.includes('pep:review');
+  let insider = steward || (!!subject && (json<string[]>(row.conveners) ?? []).includes(subject));
+  if (!insider && subject) {
+    const vwcs = await ctx.db.query<{ vwc: unknown }>(
+      `SELECT c.vwc FROM witness_refs w JOIN vta_witness_credentials c ON c.digest = w.digest WHERE w.event_id = $1`,
+      [row.id],
+    );
+    insider = vwcs.some((r) => {
+      const parties = json<VerifiableCredential>(r.vwc)?.credentialSubject?.['edgeParties'];
+      return Array.isArray(parties) && parties.includes(subject);
+    });
+  }
+  if (insider) return eventView(row, true);
+  return { id: row.id, kind: 'meeting', startsAt: toIso(row.starts_at), endsAt: toIso(row.ends_at), taskDigest: row.task_digest };
+}
+
+/** Upper bound for `witnessVolume`'s window (100 years): beyond it the date arithmetic stops meaning anything. */
+export const MAX_SINCE_DAYS = 36_500;
 
 export interface WitnessVolume {
   witness: string;
@@ -427,6 +509,9 @@ export interface WitnessVolume {
  * highest volume first. Smoke rows are excluded. A plain function so the trust index can call it later.
  */
 export async function witnessVolume(ctx: VtaContext, sinceDays?: number): Promise<WitnessVolume[]> {
+  if (sinceDays !== undefined && !(sinceDays >= 0 && sinceDays <= MAX_SINCE_DAYS)) {
+    throw bad('BAD_REQUEST', `sinceDays must be between 0 and ${MAX_SINCE_DAYS}.`);
+  }
   const since = sinceDays !== undefined && Number.isFinite(sinceDays) && sinceDays >= 0
     ? new Date(ctx.now().getTime() - sinceDays * 86_400_000).toISOString()
     : null;

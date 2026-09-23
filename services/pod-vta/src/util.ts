@@ -53,18 +53,3 @@ export function validityWindow(now: Date, days: number, ceilingDays: number): { 
   return { validFrom: now.toISOString(), validUntil: new Date(now.getTime() + span).toISOString() };
 }
 
-/** A sortable, TID-shaped id (base32-sortable, microsecond clock + random tie-breaker), as in cc-gateway. */
-const B32 = '234567abcdefghijklmnopqrstuvwxyz';
-let lastMicros = 0n;
-export function tid(now: () => Date): string {
-  let micros = BigInt(now().getTime()) * 1000n;
-  if (micros <= lastMicros) micros = lastMicros + 1n;
-  lastMicros = micros;
-  let value = ((micros << 10n) | BigInt(Math.floor(Math.random() * 1024))) & 0x7fffffffffffffffn;
-  let out = '';
-  for (let i = 0; i < 13; i++) {
-    out = B32[Number(value & 0x1fn)] + out;
-    value >>= 5n;
-  }
-  return out;
-}

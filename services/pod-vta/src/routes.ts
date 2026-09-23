@@ -3,7 +3,7 @@ import { requireAuthority, ServiceError, type RouteRequest } from '@passport/ser
 import { createSession, verifyDTG, type VerifyResult } from '@passport/verifier-sdk';
 import { DbChallengeStore, defaultChallengeStore, podDomain, type ChallengeStore } from './challenges.js';
 import { adjudicateDispute, fileDispute, listDisputes } from './disputes.js';
-import { createEvent, getEvent, listEvents, witnessEdge, witnessMeeting, witnessVolume } from './events.js';
+import { createEvent, getEventFor, listEvents, MAX_SINCE_DAYS, witnessEdge, witnessMeeting, witnessVolume } from './events.js';
 import { acknowledgeMembership, applyMembership, listMembers } from './membership.js';
 import { governanceLog, refreshAuthorities, revokeAuthority, statusListCredential, stewardSetTier, statusListUrl, VAC_STATUS_LIST } from './pep.js';
 import { defaultRelayStore, relayAppend, relayList } from './relay.js';
@@ -172,14 +172,20 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
         return { body: { events: await listEvents(ctx, { kind: 'meeting' }) } };
       },
     },
-    { method: 'GET', path: '/events/:id', auth: 'none', handler: async (ctx, req) => ({ body: await getEvent(ctx, req.params['id'] ?? '') }) },
+    {
+      // Events are public; a meeting is shown in full only to stewards and its own people (see getEventFor).
+      method: 'GET',
+      path: '/events/:id',
+      auth: 'none',
+      handler: async (ctx, req) => ({ body: await getEventFor(ctx, req.params['id'] ?? '', req.session) }),
+    },
     {
       method: 'POST',
       path: '/events/:id/witness',
       auth: 'authority:vwc:issue',
       handler: async (ctx, req) => {
         const s = need(ctx, req, 'vwc:issue');
-        const out = await witnessEdge(ctx, deps, s.subject, req.params['id'] ?? '', req.body);
+        const out = await witnessEdge(ctx, deps, s.subject, req.params['id'] ?? '', req.body, { sessionTier: s.tier });
         return { status: out.existing ? 200 : 201, body: out };
       },
     },
@@ -191,7 +197,7 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       auth: 'authority:vwc:issue',
       handler: async (ctx, req) => {
         const s = need(ctx, req, 'vwc:issue');
-        const out = await witnessMeeting(ctx, deps, s.subject, req.body);
+        const out = await witnessMeeting(ctx, deps, s.subject, req.body, { sessionTier: s.tier });
         return { status: out.existing ? 200 : 201, body: out };
       },
     },
@@ -304,7 +310,7 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       },
     },
     {
-      // Witness volume per witness DID (FR-TR-3 anomaly input). `?sinceDays=N` limits the window (default: all time).
+      // Witness volume per witness DID (FR-TR-3 anomaly input). `?sinceDays=N` (0–36500) limits the window (default: all time).
       method: 'GET',
       path: '/steward/witnesses',
       auth: 'authority:pep:review',
@@ -314,7 +320,9 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
         let sinceDays: number | undefined;
         if (raw !== undefined && raw !== '') {
           sinceDays = Number(raw);
-          if (!Number.isFinite(sinceDays) || sinceDays < 0) throw bad('BAD_REQUEST', 'sinceDays must be a non-negative number.');
+          if (!Number.isFinite(sinceDays) || sinceDays < 0 || sinceDays > MAX_SINCE_DAYS) {
+            throw bad('BAD_REQUEST', `sinceDays must be a number of days between 0 and ${MAX_SINCE_DAYS}.`);
+          }
         }
         return { body: { ...(sinceDays !== undefined ? { sinceDays } : {}), witnesses: await witnessVolume(ctx, sinceDays) } };
       },

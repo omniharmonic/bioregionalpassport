@@ -10,7 +10,7 @@ import {
 import { ServiceError } from '@passport/service-kit';
 import { tierRank, TIERS, type Tier } from '@passport/vocab';
 import { checkVrcPair, findPair } from './edges.js';
-import { canWitnessAt, getEventRow } from './events.js';
+import { canWitnessAt, currentTier, getEventRow } from './events.js';
 import { issueAuthorities, logGovernance, setEffective } from './pep.js';
 import type { PodVtaDeps, VtaContext } from './types.js';
 import { bad, isObject, json, toIso, toMs, validityWindow } from './util.js';
@@ -132,23 +132,23 @@ export async function checkWitness(
 /**
  * Who may witness for admission is pod policy (Task 21a). Holding `vwc:issue` at witness time (checked above)
  * is always required. When the policy sets `admission.witnessTier` (e.g. 'T2'), the witness must ALSO have been
- * at that tier or above when they witnessed: their governance-or-effective tier, `GREATEST(tier, effective_tier)`
- * from `members`, recorded on `witness_refs.witness_tier` at witness time (migration 0011). Rows from before
- * that column fall back to the witness's current `members` row. When `admission.witnessTier` is unset there is
- * no extra check beyond `vwc:issue`.
+ * at that tier or above when they witnessed: `witness_refs.witness_tier` (migration 0011), recorded at witness
+ * time from the session tier that carried `vwc:issue`, capped by the pod's current record (events.ts#witnessTierAt);
+ * 'T0' when the witness had no `members` row. Rows that predate 0011 carry 'legacy' (NULL is treated the same,
+ * defensively): for those only, the witness's CURRENT tier is used (`currentTier`: governance tier, raised by the
+ * effective tier only while `effective_until` has not passed). When `admission.witnessTier` is unset there is no
+ * extra check beyond `vwc:issue`.
  *
  * The field is read defensively (`(ctx.policy as any).admission?.witnessTier`): the trust policy schema does
- * not define it yet; the schema task will formalise it.
+ * not define it yet; the schema task (21c) formalises it.
  */
 async function checkWitnessTier(ctx: VtaContext, witness: string | null, recorded: string | null): Promise<void> {
   const required = (ctx.policy as any)?.admission?.witnessTier;
   if (!isTier(required)) return;
-  let at: string | null = recorded;
-  if (!isTier(at) && witness) {
-    const [row] = await ctx.db.query<{ t: string | null }>('SELECT GREATEST(tier, effective_tier) AS t FROM members WHERE did = $1', [witness]);
-    at = row?.t ?? null;
-  }
-  const held: Tier = isTier(at) ? at : 'T0';
+  let held: Tier;
+  if (isTier(recorded)) held = recorded;
+  else if (recorded === null || recorded === 'legacy') held = witness ? await currentTier(ctx, witness) : 'T0';
+  else held = 'T0';
   if (tierRank(held) < tierRank(required)) {
     throw new ServiceError(
       403,
