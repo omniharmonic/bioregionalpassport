@@ -1,17 +1,25 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
-import { useState, type FormEvent } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
+import { useState, useTransition, type FormEvent } from 'react';
 import { Button, Field, Input, Notice, Select, Textarea } from '@passport/ui-kit';
-import { roundApi } from '../_lib/api';
+import { roundApi } from '../../_lib/api';
+import type { DoneKey } from '../_lib/done';
 
-type Msg = { kind: 'success' | 'error'; text: string } | null;
+type Msg = { kind: 'error'; text: string } | null;
 
+/**
+ * Runs one steward call. On success the page is navigated to itself with a fresh `?done=` marker (issue 5 of the
+ * MVP e2e report): a new URL always re-renders the server page, so the round list is re-read from the database
+ * and cannot keep showing "No rounds yet". The server page shows the matching confirmation sentence.
+ */
 function useAction() {
   const router = useRouter();
+  const pathname = usePathname();
+  const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<Msg>(null);
-  const run = async (slug: string, path: string, body: unknown, done: string): Promise<boolean> => {
+  const run = async (slug: string, path: string, body: unknown, done: DoneKey): Promise<boolean> => {
     setBusy(true);
     setMsg(null);
     const res = await roundApi(slug, path, { method: 'POST', body });
@@ -20,11 +28,13 @@ function useAction() {
       setMsg({ kind: 'error', text: res.message });
       return false;
     }
-    setMsg({ kind: 'success', text: done });
-    router.refresh();
+    // The confirmation sentence is rendered by the server page from `?done=` (this component may remount).
+    startTransition(() => {
+      router.replace(`${pathname}?done=${done}&at=${Date.now()}`, { scroll: false });
+    });
     return true;
   };
-  return { busy, msg, run };
+  return { busy: busy || pending, msg, run };
 }
 
 const TIER_OPTIONS = [
@@ -53,7 +63,7 @@ export function CreateRoundForm({ slug, unit }: { slug: string; unit: string }) 
     };
     if (text('matchingCap')) eligibility['matchingCap'] = Number(text('matchingCap'));
     const body = { title: text('title'), pool: Number(text('pool')), opensAt: toIso('opensAt'), closesAt: toIso('closesAt'), eligibility };
-    if (await run(slug, '/rounds', body, 'Round created as a draft. Open it when it is ready.')) form.reset();
+    if (await run(slug, '/rounds', body, 'created')) form.reset();
   };
 
   return (
@@ -107,9 +117,9 @@ export function CreateRoundForm({ slug, unit }: { slug: string; unit: string }) 
 }
 
 const ACTIONS = {
-  open: { label: 'Open for proposals and voting', done: 'The round is open.' },
-  close: { label: 'Close voting and count', done: 'Voting is closed and the ballots are counted. Review, then publish.' },
-  publish: { label: 'Publish results', done: 'Results are published as open records.' },
+  open: { label: 'Open for proposals and voting' },
+  close: { label: 'Close voting and count' },
+  publish: { label: 'Publish results' },
 } as const;
 
 export function RoundActionButton({ slug, roundId, action }: { slug: string; roundId: string; action: keyof typeof ACTIONS }) {
@@ -118,7 +128,7 @@ export function RoundActionButton({ slug, roundId, action }: { slug: string; rou
   return (
     <div className="grid gap-2">
       <div>
-        <Button variant={action === 'publish' ? 'primary' : 'secondary'} disabled={busy} onClick={() => run(slug, `/rounds/${encodeURIComponent(roundId)}/${action}`, undefined, a.done)}>
+        <Button variant={action === 'publish' ? 'primary' : 'secondary'} disabled={busy} onClick={() => run(slug, `/rounds/${encodeURIComponent(roundId)}/${action}`, undefined, action)}>
           {busy ? 'Working…' : a.label}
         </Button>
       </div>
@@ -135,7 +145,7 @@ export function AdjustmentForm({ slug, roundId, proposals }: { slug: string; rou
     const form = e.currentTarget;
     const f = new FormData(form);
     const body = { proposalId: String(f.get('proposalId') ?? ''), delta: Number(f.get('delta')), reason: String(f.get('reason') ?? '').trim() };
-    if (await run(slug, `/rounds/${encodeURIComponent(roundId)}/adjustments`, body, 'Adjustment logged; the count was updated.')) form.reset();
+    if (await run(slug, `/rounds/${encodeURIComponent(roundId)}/adjustments`, body, 'adjusted')) form.reset();
   };
 
   return (

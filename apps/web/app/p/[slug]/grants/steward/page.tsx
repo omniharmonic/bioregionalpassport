@@ -4,9 +4,11 @@ import { Card, EmptyState, Explain, Notice, PageHeader, Pill } from '@passport/u
 import { loadPod } from '@/lib/pod';
 import { currentPodBase } from '@/lib/podRequest';
 import { STEWARD_SCOPE, can, podSession, withRound } from '../_lib/data';
-import { PHASE_LABEL, day, money, phaseOf } from '../_lib/format';
+import { PHASE_LABEL, money, phaseOf } from '../_lib/format';
 import { abbreviate } from '../_lib/voting';
-import { AdjustmentForm, CreateRoundForm, RoundActionButton } from '../_components/StewardActions';
+import { podDay, podTimeZone } from '../../events/_lib/podTime';
+import { AdjustmentForm, CreateRoundForm, RoundActionButton } from './_components/StewardActions';
+import { DONE, isDoneKey } from './_lib/done';
 
 export const dynamic = 'force-dynamic';
 export const metadata: Metadata = { title: 'Round steward console' };
@@ -18,9 +20,14 @@ interface ConsoleRound extends RoundView {
 
 const NEXT_ACTION = { draft: 'open', open: 'close', tallying: 'publish' } as const;
 
-export default async function StewardConsolePage({ params }: PageProps<'/p/[slug]/grants/steward'>) {
+export default async function StewardConsolePage({ params, searchParams }: PageProps<'/p/[slug]/grants/steward'>) {
   const { slug } = await params;
+  const doneRaw = (await searchParams)['done'];
+  const doneKey = isDoneKey(doneRaw) ? doneRaw : null;
   const pod = await loadPod(slug);
+  // Dates in the pod's own zone, not the server's UTC (issue 7 of the MVP e2e report).
+  const tz = podTimeZone(pod.manifest);
+  const day = (iso: string | null) => podDay(iso, tz);
   const [base, session] = await Promise.all([currentPodBase(slug), podSession(pod)]);
 
   if (!can(session, STEWARD_SCOPE)) {
@@ -75,6 +82,11 @@ export default async function StewardConsolePage({ params }: PageProps<'/p/[slug
         <h2 id="rounds" className="text-2xl font-medium">
           Rounds
         </h2>
+        {doneKey ? (
+          <div role="status">
+            <Notice kind="success">{DONE[doneKey]}</Notice>
+          </div>
+        ) : null}
         {rounds === null ? (
           <p role="status">Rounds are not available right now. Please try again in a moment.</p>
         ) : rounds.length === 0 ? (
