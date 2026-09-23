@@ -70,6 +70,9 @@ const MAX_SKEW_SEC = 600;
 const DAY_MS = 86_400_000;
 const CEILING_MESSAGE = 'This credential was issued with a longer validity than the profile allows.';
 const PAY_RECEIVE_UNSCOPED = 'This gate needs pay:receive scoped to an enterprise.';
+const FORWARDED_ONLY_PAY = 'Forwarded authority credentials can only carry pay:receive.';
+/** B3 §3: the only action that may be forwarded (attenuated, owner → staff). */
+const FORWARDABLE_ACTION = 'pay:receive';
 
 /** A `requireAuthority` entry: `action` or `action@<scopeDid>` (e.g. `pay:receive@did:web:…:moxie-bread`). */
 export function parseAuthorityRequirement(entry: string): { action: string; scope?: string } {
@@ -273,11 +276,22 @@ async function run(vp: VerifiablePresentation, policy: VerifyPolicy, deps: Verif
   const podOk = (issuer: string) => (pod ? issuer === pod : acceptedSet.has(issuer));
   const isPodScope = (scope: unknown) => typeof scope === 'string' && (pod ? scope === pod : acceptedSet.has(scope));
 
+  // A forwarded (attenuated) VAC may only contribute pay:receive; anything else on it is ignored, once explained.
+  let forwardedNoted = false;
+  const noteForwarded = () => {
+    if (!forwardedNoted) explanation.push(FORWARDED_ONLY_PAY);
+    forwardedNoted = true;
+  };
+
   /** First valid VAC of `subject` for the requirement, or the first problem, or nothing. */
   const findAuthority = (subject: string, req: { action: string; scope?: string }) => {
     const candidates = vacs.filter((vc) => {
       const a = vc.credentialSubject?.['authority'];
       if (vc.credentialSubject?.id !== subject || !a || !Array.isArray(a.actions) || !a.actions.includes(req.action)) return false;
+      if (a.parent && req.action !== FORWARDABLE_ACTION) {
+        noteForwarded();
+        return false;
+      }
       return req.scope ? a.scope === req.scope : isPodScope(a.scope);
     });
     let problem: Refusal | undefined;
@@ -336,6 +350,14 @@ async function run(vp: VerifiablePresentation, policy: VerifyPolicy, deps: Verif
     const a = vc.credentialSubject['authority'];
     for (const act of a.actions as string[]) {
       if (subject !== holder && !delegatedScope!.has(act)) continue;
+      if (a.parent) {
+        if (act !== FORWARDABLE_ACTION) {
+          noteForwarded();
+          continue;
+        }
+        actions.add(`${act}@${a.scope}`);
+        continue;
+      }
       actions.add(isPodScope(a.scope) ? act : `${act}@${a.scope}`);
     }
     const t = vc.credentialSubject['tier'];

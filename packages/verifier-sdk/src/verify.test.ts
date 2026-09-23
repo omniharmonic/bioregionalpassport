@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildAuthority, buildMembershipGrant, createResolver, digestMultibase, type VerifiableCredential } from '@passport/credential-core';
+import { attenuate, buildAuthority, buildMembershipGrant, createResolver, digestMultibase, type VerifiableCredential } from '@passport/credential-core';
 import { verifyDTG, type VerifyPolicy } from './index.js';
 import {
   BOULDER,
@@ -162,6 +162,28 @@ describe('verifyDTG', () => {
     expect(r.authorities).toEqual([`pay:receive@${ENTERPRISE}`]);
     expect(r.explanation).toContain('Authority to receive payments at moxie-bread is valid until 2026-10-10.');
     expect(ENTERPRISE).toContain('moxie-bread');
+  });
+
+  it('ignores forwarded authority other than pay:receive (B3 §3)', async () => {
+    const root = vac(boulder, bob.did, ['credit:limit:L3', 'credit:account', 'pay:receive'], { tier: 'T3' });
+    const child = sign(attenuate(root, { issuerKey: bob, subject: carol.did, actions: ['credit:limit:L3', 'credit:account'], validFrom: FROM, validUntil: STAFF_UNTIL }), bob);
+    const vp = present([...membershipPair(boulder, carol), root, child], carol);
+    const gate = await verifyDTG(vp, policy({ requireAuthority: ['credit:limit:L3'] }), deps());
+    expect(gate.error?.code).toBe('MISSING_AUTHORITY');
+    expect(gate.explanation).toContain('Forwarded authority credentials can only carry pay:receive.');
+    // Membership-only gate: accepted, but the forwarded actions are not reported.
+    const open = await verifyDTG(vp, policy({ requireAuthority: [] }), deps());
+    expect(open.ok).toBe(true);
+    expect(open.authorities).toEqual([]);
+    expect(open.explanation).toContain('Forwarded authority credentials can only carry pay:receive.');
+  });
+
+  it('still accepts forwarded pay:receive@<enterprise> and reports only that', async () => {
+    const root = vac(boulder, bob.did, ['pay:receive', 'credit:account'], { scope: ENTERPRISE });
+    const child = sign(attenuate(root, { issuerKey: bob, subject: carol.did, actions: ['pay:receive', 'credit:account'], validFrom: FROM, validUntil: STAFF_UNTIL }), bob);
+    const r = await verifyDTG(present([...membershipPair(boulder, carol), root, child], carol), policy({ requireAuthority: [`pay:receive@${ENTERPRISE}`] }), deps());
+    expect(r.ok).toBe(true);
+    expect(r.authorities).toEqual([`pay:receive@${ENTERPRISE}`]);
   });
 
   it('refuses an attenuated VAC whose parent is not presented', async () => {
