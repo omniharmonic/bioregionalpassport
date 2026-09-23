@@ -25,9 +25,16 @@ export function proxy(request: NextRequest) {
   const platformDomain = (process.env['PLATFORM_DOMAIN'] || 'bioregionalpassport.org').toLowerCase();
   const host = request.headers.get('x-forwarded-host') ?? request.headers.get('host');
   const slug = slugFromHost(host, { platformDomain, customDomains: customDomains() });
-  if (!slug) return NextResponse.next();
-
   const headers = new Headers(request.headers);
+  if (!slug) {
+    // Platform host: `x-pod-host` is ours alone; drop any client-sent copy. A client
+    // `x-pod` is dropped too, except on `/api` where it is the plan's explicit
+    // last-resort tenant selector (after host and `/p/<slug>` path).
+    headers.delete('x-pod-host');
+    if (!request.nextUrl.pathname.startsWith('/api/')) headers.delete('x-pod');
+    return NextResponse.next({ request: { headers } });
+  }
+
   headers.set('x-pod', slug);
   headers.set('x-pod-host', '1');
 

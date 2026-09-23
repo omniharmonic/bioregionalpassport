@@ -37,6 +37,8 @@ export interface MountOptions {
   sessionEndpoint?: boolean;
   /** Message for a 404 on an unmatched path (e.g. a service that is not deployed yet). */
   notFoundMessage?: string;
+  /** Called after a handler succeeds (status < 400), e.g. to invalidate caches after a write. */
+  onSuccess?: (event: { method: Method; path: string; params: Record<string, string>; body: unknown }) => void;
 }
 
 export interface PodInfo {
@@ -131,6 +133,7 @@ function json(status: number, body: unknown, headers?: HeadersInit): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), { status, headers: h });
 }
 
+
 // ---------------------------------------------------------------------------
 // Route matching
 // ---------------------------------------------------------------------------
@@ -210,12 +213,15 @@ const UNAUTHENTICATED = () => new MountError(401, 'UNAUTHENTICATED', 'You need t
 /**
  * Enforces `route.auth`. `podDid` is set for pod-scoped mounts: a session
  * minted by another pod never satisfies member/authority gates here.
+ * On platform-scope mounts (`podDid` unset) `operator` is Bearer-only: a pod's
+ * `registry:propose` session must not reach cross-pod control routes.
  */
 export function checkAuth(
   auth: RouteAuth | undefined,
   input: { session: SessionClaims | null; podDid?: string; bearerToken: string | null; operatorToken?: string | undefined },
 ): void {
   const { session, podDid } = input;
+  const platformScope = podDid === undefined;
   const samePod = (s: SessionClaims) => podDid === undefined || s.pod === podDid;
   const needAuthority = (scope: string) => {
     if (!session) throw UNAUTHENTICATED();
@@ -242,6 +248,14 @@ export function checkAuth(
       if (input.operatorToken && constantTimeEqual(token, input.operatorToken)) return;
       throw new MountError(403, 'OPERATOR_ONLY', 'That operator key is not valid.');
     }
+    if (platformScope) {
+      throw new MountError(
+        session ? 403 : 401,
+        'OPERATOR_ONLY',
+        'Only the platform operator can do this.',
+        'Send the operator key in an Authorization: Bearer header.',
+      );
+    }
     if (!session) {
       throw new MountError(401, 'OPERATOR_ONLY', 'Only a pod operator can do this.', 'Send the operator key in an Authorization: Bearer header, or present a passport carrying registry:propose.');
     }
@@ -255,9 +269,50 @@ export function checkAuth(
 // Request parsing
 // ---------------------------------------------------------------------------
 
-async function parseBody(req: Request): Promise<unknown> {
+/** Default request-body ceiling. */
+export const BODY_LIMIT = 64 * 1024;
+/** Ceiling for endpoints that carry verifiable presentations. */
+export const PRESENTATION_BODY_LIMIT = 256 * 1024;
+const PRESENTATION_PATHS = [/\/session(\/|$)/, /\/membership\/apply$/, /\/pay\/authorize$/, /\/ballots$/];
+
+export function bodyLimitFor(path: string): number {
+  const p = path.replace(/\/+$/, '');
+  return PRESENTATION_PATHS.some((re) => re.test(p)) ? PRESENTATION_BODY_LIMIT : BODY_LIMIT;
+}
+
+const tooLarge = (limit: number) =>
+  new MountError(413, 'BODY_TOO_LARGE', `The request body is larger than ${Math.round(limit / 1024)} KB.`);
+
+/** Reads the body as text, counting bytes as they stream so a missing or false Content-Length cannot bypass `limit`. */
+async function readLimited(req: Request, limit: number): Promise<string> {
+  const declared = Number(req.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) throw tooLarge(limit);
+  if (!req.body) return '';
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      throw tooLarge(limit);
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    all.set(c, off);
+    off += c.byteLength;
+  }
+  return new TextDecoder().decode(all);
+}
+
+async function parseBody(req: Request, limit: number): Promise<unknown> {
   if (req.method === 'GET' || req.method === 'HEAD') return undefined;
-  const text = await req.text();
+  const text = await readLimited(req, limit);
   if (text.trim().length === 0) return undefined;
   const type = req.headers.get('content-type') ?? '';
   if (type && !/json/i.test(type)) {
@@ -343,7 +398,7 @@ export function mountService(routes: MountableRoute[], opts: MountOptions, depsS
         operatorToken: deps.operatorToken,
       });
 
-      const routeReq: RouteRequest = { params, query: queryOf(url), body: await parseBody(req) };
+      const routeReq: RouteRequest = { params, query: queryOf(url), body: await parseBody(req, bodyLimitFor(path)) };
       if (session) routeReq.session = session;
 
       let result: RouteResult;
@@ -363,13 +418,25 @@ export function mountService(routes: MountableRoute[], opts: MountOptions, depsS
       }
 
       const headers = new Headers();
-      const token = (result.body as { token?: unknown } | null | undefined)?.token;
+      let body: unknown = result.body ?? null;
+      const token = (body as { token?: unknown } | null)?.token;
       const trimmed = path.replace(/\/+$/, '');
       const isSessionPath = trimmed === '/session' || trimmed.startsWith('/session/');
       if (method === 'POST' && isSessionPath && typeof token === 'string' && token.length > 0) {
         headers.append('set-cookie', sessionCookieHeader(token, deps.secureCookies));
+        // The token lives only in the HttpOnly cookie; never hand it to page scripts.
+        const { token: _token, ...rest } = body as Record<string, unknown>;
+        body = { ok: true, ...rest };
       }
-      return json(result.status ?? 200, result.body ?? null, headers);
+      const status = result.status ?? 200;
+      if (opts.onSuccess && status < 400) {
+        try {
+          opts.onSuccess({ method: method as Method, path, params, body: result.body });
+        } catch (hookErr) {
+          (deps.logError ?? defaultLog)(hookErr, `api ${opts.base} onSuccess`);
+        }
+      }
+      return json(status, body, headers);
     } catch (err) {
       return errorToResponse(err, deps?.logError, `api ${opts.base}`);
     }

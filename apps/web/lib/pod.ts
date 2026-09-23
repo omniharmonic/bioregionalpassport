@@ -22,7 +22,9 @@ interface Entry<T> {
   value: Promise<T>;
 }
 
-const podCache = new Map<string, Entry<LoadedPod | null>>();
+const podCache = new Map<string, Entry<LoadedPod>>();
+
+class PodMissing extends Error {}
 const signerCache = new Map<string, Entry<PodSigner>>();
 
 function cached<T>(cache: Map<string, Entry<T>>, key: string, load: () => Promise<T>): Promise<T> {
@@ -40,7 +42,9 @@ export function findPod(slug: string): Promise<LoadedPod | null> {
   if (!isSlug(slug)) return Promise.resolve(null);
   return cached(podCache, slug, async () => {
     const view = await getPod(db(), slug);
-    if (!view) return null;
+    // Throwing (not returning null) keeps a missing pod out of the cache, so a pod
+    // provisioned moments later is found immediately.
+    if (!view) throw new PodMissing();
     const policy = view.policy === null ? null : jsonValue<TrustPolicy>(view.policy);
     return {
       slug: view.slug,
@@ -49,6 +53,9 @@ export function findPod(slug: string): Promise<LoadedPod | null> {
       policy: policy ?? defaultTrustPolicy(view.did),
       status: view.status,
     };
+  }).catch((err: unknown) => {
+    if (err instanceof PodMissing) return null;
+    throw err;
   });
 }
 

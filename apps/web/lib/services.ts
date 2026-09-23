@@ -11,7 +11,7 @@ import { createTrustIndexRoutes, ensureIndexTables, markWeighted, recommendTier 
 import { db } from './db';
 import { env } from './env';
 import { MountError, errorToResponse, mountService, subPath, type MountableRoute, type MountedService } from './mount';
-import { findPod, loadPodSigner } from './pod';
+import { findPod, invalidatePod, loadPodSigner } from './pod';
 import { resolveSlug } from './tenant';
 
 /** Platform TRQP registry (no pod scope). */
@@ -28,7 +28,20 @@ export const controlService = mountService(
     provisionDeps: { seedRecords: appview.seedDemoRecords },
     verifyDeps: { vta: podVta, appview },
   }) as MountableRoute[],
-  { base: '/api/control', scope: 'platform' },
+  {
+    base: '/api/control',
+    scope: 'platform',
+    // Drop this instance's cached manifest/policy/signer after a successful write
+    // (other instances pick the change up when their 60 s cache expires).
+    onSuccess: ({ method, path, params, body }) => {
+      if (method === 'POST' && path.replace(/\/+$/, '') === '/pods') {
+        const slug = (body as { slug?: unknown } | null)?.slug;
+        if (typeof slug === 'string') invalidatePod(slug);
+      } else if (method === 'PUT' && /^\/pods\/[^/]+\/manifest\/?$/.test(path) && params['slug']) {
+        invalidatePod(params['slug']);
+      }
+    },
+  },
 );
 
 /** Trust index (pod scope); its side tables are ensured inside the pod transaction. */
@@ -93,6 +106,9 @@ async function vtaFor(slug: string): Promise<MountedService> {
     podSigner: signer,
     resolver,
     sessionSecret: env().SESSION_SECRET,
+    // Required, not optional: with `platformDb` pod-vta keeps sign-in challenges and relay
+    // messages in `platform.relay_messages`, so a challenge issued by one serverless
+    // instance is found by another. Without it both fall back to per-process memory.
     platformDb: db(),
     index: {
       recommendTier: (ctx, did) => recommendTier(ctx, did),

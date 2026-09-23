@@ -36,18 +36,21 @@ describe('slugFromPath', () => {
   });
 });
 
-describe('resolveSlug order: x-pod header → host → /p/<slug> path → ?pod=', () => {
-  it('prefers the x-pod header', () => {
-    expect(resolveSlug(req('https://tenant-zero.bioregionalpassport.org/p/other/x?pod=q1', { 'x-pod': 'boulder' }), cfg)).toBe('boulder');
+describe('resolveSlug order: host → /p/<slug> path → x-pod header → ?pod=', () => {
+  it('prefers the host over a client-sent x-pod header', () => {
+    expect(resolveSlug(req('https://tenant-zero.bioregionalpassport.org/p/other/x?pod=q1', { 'x-pod': 'boulder' }), cfg)).toBe('tenant-zero');
   });
-  it('falls back to the host', () => {
-    expect(resolveSlug(req('https://tenant-zero.bioregionalpassport.org/p/other/x?pod=q1'), cfg)).toBe('tenant-zero');
+  it('prefers a custom domain host', () => {
+    expect(resolveSlug(req('https://commons.boulder.org/api/index', { 'x-pod': 'tenant-zero' }), cfg)).toBe('boulder');
   });
   it('uses x-forwarded-host when present', () => {
     expect(resolveSlug(req('http://internal/api/index', { 'x-forwarded-host': 'boulder.bioregionalpassport.org' }), cfg)).toBe('boulder');
   });
-  it('falls back to the path', () => {
-    expect(resolveSlug(req('https://bioregionalpassport.org/p/other/x?pod=q1'), cfg)).toBe('other');
+  it('falls back to the path, which beats the header', () => {
+    expect(resolveSlug(req('https://bioregionalpassport.org/p/other/x?pod=q1', { 'x-pod': 'boulder' }), cfg)).toBe('other');
+  });
+  it('falls back to the x-pod header, which beats the query', () => {
+    expect(resolveSlug(req('https://bioregionalpassport.org/api/index/me?pod=q1', { 'x-pod': 'boulder' }), cfg)).toBe('boulder');
   });
   it('falls back to the query', () => {
     expect(resolveSlug(req('https://bioregionalpassport.org/api/index/me?pod=boulder'), cfg)).toBe('boulder');

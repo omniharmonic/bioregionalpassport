@@ -1,9 +1,8 @@
 /**
  * Tenant (pod slug) resolution — pure, shared by `proxy.ts`, `mountService`
- * and pages. B2 §2.3 order: custom domain → `<slug>.<PLATFORM_DOMAIN>` →
- * `/p/<slug>` path prefix → `X-Pod` header. `proxy.ts` turns the host forms
- * into an authoritative `x-pod` header (overwriting anything a client sent on
- * a pod host), so request handlers check that header first.
+ * and pages. Plan §1 / B2 §2.3 order: custom domain → `<slug>.<PLATFORM_DOMAIN>`
+ * → `/p/<slug>` path prefix → `X-Pod` header → `?pod=` query. The host always
+ * wins, so a client-sent `X-Pod` can never re-target a pod host's request.
  */
 
 export const SLUG_RE = /^[a-z0-9-]{2,40}$/;
@@ -50,18 +49,18 @@ export function slugFromPath(pathname: string): string | null {
 }
 
 /**
- * Resolves the tenant for a request: `x-pod` header (set by the proxy from the
- * host, or sent explicitly) → host → `/p/<slug>` path → `?pod=` query.
- * Every candidate is validated with the slug regex; the first valid one wins.
+ * Resolves the tenant for a request: host (custom domain or `<slug>.<domain>`)
+ * → `/p/<slug>` path → `x-pod` header → `?pod=` query. Every candidate is
+ * validated with the slug regex; the first valid one wins.
  */
 export function resolveSlug(req: Request, cfg: HostConfig): string | null {
-  const header = req.headers.get('x-pod')?.trim().toLowerCase();
-  if (isSlug(header)) return header;
   const url = new URL(req.url);
   const fromHost = slugFromHost(req.headers.get('x-forwarded-host') ?? req.headers.get('host') ?? url.host, cfg);
   if (fromHost) return fromHost;
   const fromPath = slugFromPath(url.pathname);
   if (fromPath) return fromPath;
+  const header = req.headers.get('x-pod')?.trim().toLowerCase();
+  if (isSlug(header)) return header;
   const q = url.searchParams.get('pod')?.trim().toLowerCase();
   return isSlug(q) ? q : null;
 }

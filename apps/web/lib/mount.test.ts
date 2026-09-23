@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ServiceError, type SessionClaims } from '@passport/service-kit';
-import { checkAuth, matchPath, matchRoute, mountService, subPath, type MountDeps, type MountableRoute } from './mount';
+import { BODY_LIMIT, PRESENTATION_BODY_LIMIT, bodyLimitFor, checkAuth, matchPath, matchRoute, mountService, subPath, type MountDeps, type MountableRoute } from './mount';
 
 const POD_DID = 'did:web:bioregionalpassport.org:dids:boulder';
 const OTHER_DID = 'did:web:bioregionalpassport.org:dids:tenant-zero';
@@ -50,6 +50,8 @@ const routes: MountableRoute[] = [
   { method: 'POST', path: '/recompute', auth: 'operator', handler: echo },
   { method: 'POST', path: '/session', auth: 'none', handler: async () => ({ status: 201, body: { token: 'signed.session.token', subject: 'did:key:z' } }) },
   { method: 'POST', path: '/session/visitor', auth: 'none', handler: async () => ({ body: { token: 'visitor.token' } }) },
+  { method: 'POST', path: '/echo', auth: 'none', handler: async (_ctx, req) => ({ body: { bytes: JSON.stringify(req.body ?? null).length } }) },
+  { method: 'POST', path: '/membership/apply', auth: 'none', handler: async (_ctx, req) => ({ body: { bytes: JSON.stringify(req.body ?? null).length } }) },
   { method: 'POST', path: '/other', auth: 'none', handler: async () => ({ body: { token: 'not-a-session' } }) },
   { method: 'GET', path: '/boom', handler: async () => { throw new Error('db password leaked in stack'); } },
   { method: 'GET', path: '/gate', handler: async () => { throw new ServiceError(403, 'NO_MEMBERSHIP', 'You are not a member of this pod yet.', 'Attend an event.'); } },
@@ -184,9 +186,10 @@ describe('mountService (pod scope)', () => {
   });
 
   describe('session cookie', () => {
-    it('sets passport_session when POST /session returns a token', async () => {
+    it('sets passport_session when POST /session returns a token, and keeps the token out of the body', async () => {
       const r = await call(svc, 'POST', '/session', { body: {} });
       expect(r.status).toBe(201);
+      expect(await r.json()).toEqual({ ok: true, subject: 'did:key:z' });
       const cookie = r.headers.get('set-cookie') ?? '';
       expect(cookie).toContain('passport_session=signed.session.token');
       expect(cookie).toMatch(/HttpOnly/);
@@ -219,9 +222,68 @@ describe('mountService (platform scope)', () => {
     expect(await r.json()).toEqual({ domain: 'bioregionalpassport.org', hasKey: true, db: { platform: true } });
     expect(deps.calls).toEqual([]);
   });
-  it('operator routes accept any registry:propose session (no pod binding)', async () => {
+  it('operator routes are Bearer-only: a registry:propose session from any pod is refused', async () => {
     const svc = mountService([{ method: 'POST', path: '/pods', auth: 'operator', handler: async () => ({ status: 201, body: {} }) }], { base: '/api/control', scope: 'platform' }, fakeDeps());
-    const r = await svc.POST(new Request('https://bioregionalpassport.org/api/control/pods', { method: 'POST', headers: { cookie: 'passport_session=elsewhere' } }));
-    expect(r.status).toBe(201);
+    const withSession = await svc.POST(new Request('https://bioregionalpassport.org/api/control/pods', { method: 'POST', headers: { cookie: 'passport_session=elsewhere' } }));
+    expect(withSession.status).toBe(403);
+    expect((await withSession.json()).code).toBe('OPERATOR_ONLY');
+    const none = await svc.POST(new Request('https://bioregionalpassport.org/api/control/pods', { method: 'POST' }));
+    expect(none.status).toBe(401);
+    const bearer = await svc.POST(new Request('https://bioregionalpassport.org/api/control/pods', { method: 'POST', headers: { authorization: `Bearer ${OPERATOR}` } }));
+    expect(bearer.status).toBe(201);
+  });
+  it('calls onSuccess after successful writes only', async () => {
+    const seen: string[] = [];
+    const svc = mountService(
+      [
+        { method: 'PUT', path: '/pods/:slug/manifest', auth: 'operator', handler: async () => ({ body: { slug: 'boulder' } }) },
+        { method: 'POST', path: '/pods', auth: 'operator', handler: async () => { throw new ServiceError(400, 'BAD', 'no'); } },
+      ],
+      { base: '/api/control', scope: 'platform', onSuccess: (e) => seen.push(`${e.method} ${e.path} ${e.params['slug'] ?? ''}`) },
+      fakeDeps(),
+    );
+    const auth = { authorization: `Bearer ${OPERATOR}` };
+    expect((await svc.PUT(new Request('https://bioregionalpassport.org/api/control/pods/boulder/manifest', { method: 'PUT', headers: auth }))).status).toBe(200);
+    expect((await svc.POST(new Request('https://bioregionalpassport.org/api/control/pods', { method: 'POST', headers: auth }))).status).toBe(400);
+    expect(seen).toEqual(['PUT /pods/boulder/manifest boulder']);
+  });
+});
+
+describe('request body limits', () => {
+  const svc = mountService(routes, { base: '/api/svc', scope: 'pod' }, fakeDeps());
+  const big = (bytes: number) => JSON.stringify({ pad: 'x'.repeat(bytes) });
+  // A streamed body carries no Content-Length, so only the byte counter can stop it.
+  const streamed = (text: string) =>
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        const bytes = new TextEncoder().encode(text);
+        for (let i = 0; i < bytes.length; i += 8192) c.enqueue(bytes.slice(i, i + 8192));
+        c.close();
+      },
+    });
+  const post = (path: string, body: BodyInit, headers: Record<string, string> = {}) =>
+    svc.POST(new Request(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body, duplex: 'half' } as RequestInit));
+
+  it('uses 64 KB by default and 256 KB for presentation endpoints', () => {
+    expect(bodyLimitFor('/echo')).toBe(BODY_LIMIT);
+    for (const p of ['/session', '/session/visitor', '/membership/apply', '/pay/authorize', '/rounds/r1/ballots']) {
+      expect(bodyLimitFor(p)).toBe(PRESENTATION_BODY_LIMIT);
+    }
+  });
+  it('rejects a declared Content-Length over the limit with 413 BODY_TOO_LARGE', async () => {
+    const r = await post('/echo', big(BODY_LIMIT + 10));
+    expect(r.status).toBe(413);
+    expect((await r.json()).code).toBe('BODY_TOO_LARGE');
+  });
+  it('counts streamed bytes when Content-Length is missing', async () => {
+    const r = await post('/echo', streamed(big(BODY_LIMIT + 10)));
+    expect(r.status).toBe(413);
+    const ok = await post('/echo', streamed(big(1000)));
+    expect(ok.status).toBe(200);
+  });
+  it('allows bodies up to 256 KB on presentation paths, and refuses beyond', async () => {
+    expect((await post('/membership/apply', big(200 * 1024))).status).toBe(200);
+    expect((await post('/membership/apply', streamed(big(200 * 1024)))).status).toBe(200);
+    expect((await post('/membership/apply', streamed(big(PRESENTATION_BODY_LIMIT + 10)))).status).toBe(413);
   });
 });
