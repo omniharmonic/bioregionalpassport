@@ -3,7 +3,7 @@ import { requireAuthority, ServiceError, type RouteRequest } from '@passport/ser
 import { createSession, verifyDTG, type VerifyResult } from '@passport/verifier-sdk';
 import { DbChallengeStore, defaultChallengeStore, podDomain, type ChallengeStore } from './challenges.js';
 import { adjudicateDispute, fileDispute, listDisputes } from './disputes.js';
-import { createEvent, getEvent, listEvents, witnessEdge } from './events.js';
+import { createEvent, getEvent, listEvents, witnessEdge, witnessMeeting, witnessVolume } from './events.js';
 import { acknowledgeMembership, applyMembership, listMembers } from './membership.js';
 import { governanceLog, refreshAuthorities, revokeAuthority, statusListCredential, stewardSetTier, statusListUrl, VAC_STATUS_LIST } from './pep.js';
 import { defaultRelayStore, relayAppend, relayList } from './relay.js';
@@ -158,7 +158,20 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
         return { status: 201, body: await createEvent(ctx, deps, s.subject, req.body) };
       },
     },
-    { method: 'GET', path: '/events', auth: 'none', handler: async (ctx) => ({ body: { events: await listEvents(ctx) } }) },
+    {
+      // Public list of gatherings. `?kind=meeting` lists the ad-hoc meeting Trust Tasks from POST /witness
+      // instead — a steward view (pep:review), since meetings reveal who witnessed whom and when.
+      method: 'GET',
+      path: '/events',
+      auth: 'none',
+      handler: async (ctx, req) => {
+        const kind = req.query['kind'];
+        if (kind === undefined || kind === '' || kind === 'event') return { body: { events: await listEvents(ctx) } };
+        if (kind !== 'meeting') throw bad('BAD_REQUEST', 'kind must be event or meeting.');
+        need(ctx, req, 'pep:review');
+        return { body: { events: await listEvents(ctx, { kind: 'meeting' }) } };
+      },
+    },
     { method: 'GET', path: '/events/:id', auth: 'none', handler: async (ctx, req) => ({ body: await getEvent(ctx, req.params['id'] ?? '') }) },
     {
       method: 'POST',
@@ -167,6 +180,18 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       handler: async (ctx, req) => {
         const s = need(ctx, req, 'vwc:issue');
         const out = await witnessEdge(ctx, deps, s.subject, req.params['id'] ?? '', req.body);
+        return { status: out.existing ? 200 : 201, body: out };
+      },
+    },
+
+    {
+      // Meetings as Trust Tasks (Task 21a): witness a relationship seen in person without a scheduled event.
+      method: 'POST',
+      path: '/witness',
+      auth: 'authority:vwc:issue',
+      handler: async (ctx, req) => {
+        const s = need(ctx, req, 'vwc:issue');
+        const out = await witnessMeeting(ctx, deps, s.subject, req.body);
         return { status: out.existing ? 200 : 201, body: out };
       },
     },
@@ -276,6 +301,22 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
         if (typeof tier !== 'string' || !(TIERS as readonly string[]).includes(tier)) throw bad('BAD_REQUEST', 'tier must be one of T0 to T4.');
         if (!isObject(b) || typeof b['reason'] !== 'string' || !b['reason'].trim()) throw bad('BAD_REQUEST', 'A governance decision needs a reason.');
         return { body: await stewardSetTier(ctx, req.params['did'] ?? '', tier as Tier, s, b['reason'].trim()) };
+      },
+    },
+    {
+      // Witness volume per witness DID (FR-TR-3 anomaly input). `?sinceDays=N` limits the window (default: all time).
+      method: 'GET',
+      path: '/steward/witnesses',
+      auth: 'authority:pep:review',
+      handler: async (ctx, req) => {
+        need(ctx, req, 'pep:review');
+        const raw = req.query['sinceDays'];
+        let sinceDays: number | undefined;
+        if (raw !== undefined && raw !== '') {
+          sinceDays = Number(raw);
+          if (!Number.isFinite(sinceDays) || sinceDays < 0) throw bad('BAD_REQUEST', 'sinceDays must be a non-negative number.');
+        }
+        return { body: { ...(sinceDays !== undefined ? { sinceDays } : {}), witnesses: await witnessVolume(ctx, sinceDays) } };
       },
     },
     {

@@ -8,6 +8,7 @@ export type { PodSigner, PodVtaDeps, IndexHooks, TierRecommendationLike, VtaCont
 export { MemoryChallengeStore, DbChallengeStore, defaultChallengeStore, CHALLENGE_TTL_MS, podDomain, type ChallengeStore, type IssuedChallenge } from './challenges.js';
 export {
   issueAuthorities,
+  tierActions,
   refreshAuthorities,
   revokeAuthority,
   statusListCredential,
@@ -25,7 +26,24 @@ export {
   type IssuedAuthorities,
   type RefreshResult,
 } from './pep.js';
-export { SMOKE_PREFIX, createEvent, listEvents, getEvent, witnessEdge, WITNESS_VALIDITY_DAYS, type EventInput, type EventView } from './events.js';
+export {
+  SMOKE_PREFIX,
+  MEETING_PREFIX,
+  MEETING_DURATION_MS,
+  createEvent,
+  listEvents,
+  getEvent,
+  witnessEdge,
+  witnessMeeting,
+  witnessVolume,
+  abbreviateDid,
+  WITNESS_VALIDITY_DAYS,
+  type EventInput,
+  type EventView,
+  type EventKind,
+  type MeetingPlace,
+  type WitnessVolume,
+} from './events.js';
 export { applyMembership, acknowledgeMembership, checkWitness, listMembers, getMember, type AckResult, type WitnessCheck } from './membership.js';
 export { RELAY_MAX_PER_CHANNEL, RelayStore, defaultRelayStore, relayAppend, relayList, CHANNEL_RE, RELAY_TTL_MS, type RelayMessage } from './relay.js';
 export { fileDispute, listDisputes, adjudicateDispute } from './disputes.js';

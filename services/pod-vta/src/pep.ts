@@ -2,7 +2,7 @@ import { buildAuthority, digestMultibase, type VerifiableCredential } from '@pas
 import { MAX_VALIDITY_DAYS } from '@passport/credential-core';
 import { base64urlnopad } from '@scure/base';
 import { ServiceError } from '@passport/service-kit';
-import { tierDefaultActions, tierRank, TIERS, type Tier } from '@passport/vocab';
+import { tierDefaultActions, tierRank, TIERS, type AuthorityScope, type Tier } from '@passport/vocab';
 import type { PodVtaDeps, VtaContext } from './types.js';
 import { DAY_MS, json, toIso, toMs, validityWindow } from './util.js';
 
@@ -37,8 +37,25 @@ export interface VacLogRow {
 const isTier = (t: unknown): t is Tier => typeof t === 'string' && (TIERS as readonly string[]).includes(t);
 
 /**
+ * The actions a VAC at `tier` carries under this pod's policy: `tierDefaultActions(tier)` plus one policy hook.
+ *
+ * Policy hook (Task 21a; the trust policy schema task will formalise `admission.witnessTier`): when the pod's
+ * policy sets `admission.witnessTier` to 'T2' or lower, Trusted (T2) members also receive `vwc:issue`, so they can
+ * witness peers (`POST /witness`) and those witnesses admit. `@passport/vocab` keeps `vwc:issue` at T3 by
+ * default, and `event:convene` stays at T3 regardless. T0/T1 never gain `vwc:issue` from this hook.
+ */
+export function tierActions(ctx: Pick<VtaContext, 'policy'>, tier: Tier): AuthorityScope[] {
+  const actions = [...tierDefaultActions(tier)];
+  const witnessTier = (ctx.policy as any)?.admission?.witnessTier;
+  if (tier === 'T2' && isTier(witnessTier) && tierRank(witnessTier) <= tierRank('T2') && !actions.includes('vwc:issue')) {
+    actions.push('vwc:issue');
+  }
+  return actions;
+}
+
+/**
  * PEP issuance. Issues ONE root AuthorityCredential (VAC) scoped to the pod and carrying every default action
- * of `tier` (`tierDefaultActions`), rather than one VAC per action: fewer credentials to hold and present, and
+ * of `tier` (`tierActions`: the tier defaults plus the policy hook above), rather than one VAC per action: fewer credentials to hold and present, and
  * the verifier SDK accepts multi-action VACs (it matches the required action within `authority.actions`).
  *
  * The audit row is written first so its identity `id` can be the VAC's status-list index
@@ -52,7 +69,7 @@ export async function issueAuthorities(
   tier: Tier,
   explanation: string[],
 ): Promise<IssuedAuthorities> {
-  const actions = tierDefaultActions(tier);
+  const actions = tierActions(ctx, tier);
   if (!actions.length) return { vacs: [], explanation: [...explanation, `Tier ${tier} carries no authorities, so none were issued.`] };
   const now = ctx.now();
   const { validFrom, validUntil } = validityWindow(now, ctx.policy.vacValidityDays, MAX_VALIDITY_DAYS.authority);
@@ -183,7 +200,10 @@ export async function refreshAuthorities(ctx: VtaContext, deps: Pick<PodVtaDeps,
   let issued = false;
   if (entitled !== 'T0') {
     const atEntitled = valid.find((r) => r.tier === entitled);
-    const fresh = atEntitled && toMs(atEntitled.valid_until) - now >= REFRESH_WINDOW_DAYS * DAY_MS;
+    // A held VAC is also stale when policy now grants its tier more actions (e.g. `vwc:issue` at T2).
+    const heldActions = atEntitled ? json<string[]>(atEntitled.actions) ?? [] : [];
+    const complete = tierActions(ctx, entitled).every((a) => heldActions.includes(a));
+    const fresh = atEntitled && complete && toMs(atEntitled.valid_until) - now >= REFRESH_WINDOW_DAYS * DAY_MS;
     if (!fresh) {
       const out = await issueAuthorities(ctx, deps, did, entitled, [`Refreshed: recommended ${rec.tier}, governance tier ${governance}.`]);
       issued = true;

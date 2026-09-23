@@ -91,8 +91,8 @@ export async function checkWitness(
   if (!event || !canWitnessAt(event)) throw witnessInvalid('The witness credential does not name an attestation event of this pod.');
   if (event.task_digest !== subject['taskDigestMultibase']) throw witnessInvalid('The witness credential does not match the event\'s task document.');
   const digest = digestMultibase(cred);
-  const [ref] = await ctx.db.query<{ convener_did: string | null; created_at: unknown; used_by: unknown }>(
-    'SELECT convener_did, created_at, used_by FROM witness_refs WHERE digest = $1 AND event_id = $2',
+  const [ref] = await ctx.db.query<{ convener_did: string | null; created_at: unknown; used_by: unknown; witness_tier: string | null }>(
+    'SELECT convener_did, created_at, used_by, witness_tier FROM witness_refs WHERE digest = $1 AND event_id = $2',
     [digest, event.id],
   );
   if (!ref) throw witnessInvalid('This pod has no record of issuing that witness credential.');
@@ -107,6 +107,7 @@ export async function checkWitness(
     [ref.convener_did, witnessedAt],
   );
   if (!authority.length) throw witnessInvalid('The convener who witnessed this no longer holds the authority to witness.');
+  await checkWitnessTier(ctx, ref.convener_did, ref.witness_tier);
 
   // Bind the witnessed edge to the applicant: the presentation must carry BOTH signed halves of the witnessed
   // VRC pair, and the holder must be one of the two issuers.
@@ -127,6 +128,38 @@ export async function checkWitness(
   if (!usedBy.includes(holder) && (usedBy.length >= 2 || !vrcParties.includes(holder))) throw witnessUsed();
   return { eventId: event.id, placeId: event.place_id, digest, parties: [vwcParties[0]!, vwcParties[1]!], usedBy };
 }
+
+/**
+ * Who may witness for admission is pod policy (Task 21a). Holding `vwc:issue` at witness time (checked above)
+ * is always required. When the policy sets `admission.witnessTier` (e.g. 'T2'), the witness must ALSO have been
+ * at that tier or above when they witnessed: their governance-or-effective tier, `GREATEST(tier, effective_tier)`
+ * from `members`, recorded on `witness_refs.witness_tier` at witness time (migration 0011). Rows from before
+ * that column fall back to the witness's current `members` row. When `admission.witnessTier` is unset there is
+ * no extra check beyond `vwc:issue`.
+ *
+ * The field is read defensively (`(ctx.policy as any).admission?.witnessTier`): the trust policy schema does
+ * not define it yet; the schema task will formalise it.
+ */
+async function checkWitnessTier(ctx: VtaContext, witness: string | null, recorded: string | null): Promise<void> {
+  const required = (ctx.policy as any)?.admission?.witnessTier;
+  if (!isTier(required)) return;
+  let at: string | null = recorded;
+  if (!isTier(at) && witness) {
+    const [row] = await ctx.db.query<{ t: string | null }>('SELECT GREATEST(tier, effective_tier) AS t FROM members WHERE did = $1', [witness]);
+    at = row?.t ?? null;
+  }
+  const held: Tier = isTier(at) ? at : 'T0';
+  if (tierRank(held) < tierRank(required)) {
+    throw new ServiceError(
+      403,
+      'WITNESS_INVALID',
+      `This pod admits new members only on the word of a witness at tier ${required} or above.`,
+      `The witness was at tier ${held} when they witnessed this relationship.`,
+    );
+  }
+}
+
+const isTier = (t: unknown): t is Tier => typeof t === 'string' && (TIERS as readonly string[]).includes(t);
 
 export async function getMember(ctx: VtaContext, did: string): Promise<MemberRow | undefined> {
   const rows = await ctx.db.query<MemberRow>('SELECT * FROM members WHERE did = $1', [did]);

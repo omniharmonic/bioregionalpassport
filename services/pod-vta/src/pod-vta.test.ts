@@ -22,7 +22,8 @@ import { bitAt, decodeEncodedList, readSession } from '@passport/verifier-sdk';
 import { tierDefaultActions, type Tier } from '@passport/vocab';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootstrapSteward, ceremonyBackHalf } from './ceremony.js';
-import { issueAuthorities, recordGovernanceTier } from './pep.js';
+import { issueAuthorities, recordGovernanceTier, tierActions } from './pep.js';
+import { witnessVolume } from './events.js';
 import { edgePairDigest } from './edges.js';
 import { DbChallengeStore, MemoryChallengeStore } from './challenges.js';
 import { createPodVtaRoutes } from './routes.js';
@@ -101,6 +102,8 @@ interface CallOpts {
   routes?: VtaRoute[];
   /** Run outside `withPod` (as the platform relay would with a separate pool). */
   unscoped?: boolean;
+  /** Trust policy for this call (default: `policy`). */
+  policy?: TrustPolicy;
 }
 
 async function call(method: string, fullPath: string, opts: CallOpts = {}): Promise<{ status: number; body: any }> {
@@ -119,7 +122,8 @@ async function call(method: string, fullPath: string, opts: CallOpts = {}): Prom
         return errorResult(e);
       }
     };
-    return opts.unscoped ? exec(ctxFor(db, opts.now ?? NOW)) : run(exec, opts.now ?? NOW);
+    const p = opts.policy ?? policy;
+    return opts.unscoped ? exec(ctxFor(db, opts.now ?? NOW, p)) : withPod(db, SLUG, (tx) => exec(ctxFor(tx, opts.now ?? NOW, p)));
   }
   throw new Error(`no route ${method} ${path}`);
 }
@@ -155,12 +159,12 @@ async function witness(session: SessionClaims, eventId: string, edge: { vrcA: Ve
   return res.body.vwc as VerifiableCredential;
 }
 
-async function apply(key: KeyPair, vwc: unknown, creds: VerifiableCredential[]) {
-  return call('POST', '/membership/apply', { body: { vwc, presentation: createPresentation(creds, key, await challenge()) } });
+async function apply(key: KeyPair, vwc: unknown, creds: VerifiableCredential[], p?: TrustPolicy) {
+  return call('POST', '/membership/apply', { body: { vwc, presentation: createPresentation(creds, key, await challenge()) }, ...(p ? { policy: p } : {}) });
 }
 
-async function admit(key: KeyPair, vwc: unknown, creds: VerifiableCredential[]) {
-  const res = await apply(key, vwc, creds);
+async function admit(key: KeyPair, vwc: unknown, creds: VerifiableCredential[], p?: TrustPolicy) {
+  const res = await apply(key, vwc, creds, p);
   expect(res.status).toBe(201);
   const grant = res.body.grant as VerifiableCredential;
   const ack = signDocument(
@@ -858,5 +862,192 @@ describe('pod VTA — in-process smoke', () => {
     expect(res.eventId).toBe(event.id);
     expect(await counts()).toEqual(before);
     expect(await memberRow(convener.did)).toBeDefined();
+  });
+});
+
+describe('pod VTA — peer witnessing: meetings as Trust Tasks (Task 21a)', () => {
+  const steward = generateKeyPair();
+  const w = generateKeyPair(); // Trusted (T2) member who witnesses peers
+  const wPeer = generateKeyPair();
+  const p1 = generateKeyPair();
+  const p2 = generateKeyPair();
+  const p3 = generateKeyPair();
+  const p4 = generateKeyPair();
+  const stewardSession = sessionOf(steward.did, 'T3');
+  // `admission` is not in the TrustPolicy schema yet; the VTA reads it defensively.
+  const pT2 = { ...policy, admission: { witnessTier: 'T2' } } as unknown as TrustPolicy;
+  const pT3 = { ...policy, admission: { witnessTier: 'T3' } } as unknown as TrustPolicy;
+  let wSession: SessionClaims;
+  let edge12: ReturnType<typeof relationship>;
+  let vwc12: VerifiableCredential;
+  let task: any;
+  let gathering: any;
+
+  it('policy hook: vwc:issue joins the T2 action set only when admission.witnessTier ≤ T2; event:convene stays T3', async () => {
+    const ctxOf = (p: TrustPolicy) => ({ policy: p });
+    expect(tierActions(ctxOf(policy), 'T2')).not.toContain('vwc:issue');
+    expect(tierActions(ctxOf(pT3), 'T2')).not.toContain('vwc:issue');
+    expect(tierActions(ctxOf(pT2), 'T2')).toContain('vwc:issue');
+    expect(tierActions(ctxOf(pT2), 'T2')).not.toContain('event:convene');
+    expect(tierActions(ctxOf(pT2), 'T1')).not.toContain('vwc:issue');
+    expect(tierActions(ctxOf(pT2), 'T3')).toEqual(tierDefaultActions('T3'));
+  });
+
+  it('a T2 member under a witnessTier T2 policy receives vwc:issue at refresh', async () => {
+    await run((ctx) => bootstrapSteward(ctx, deps, steward.did));
+    gathering = await newEvent(stewardSession);
+    const e = relationship(w, wPeer);
+    const v = await witness(stewardSession, gathering.id, e);
+    await admit(w, v, e.both);
+    await run((ctx) => recordGovernanceTier(ctx, w.did, 'T2', 'operator', 'elected Trusted by assembly'));
+    // Under the default policy the T2 VAC carries no vwc:issue.
+    const plain = await call('POST', '/authority/refresh', { session: sessionOf(w.did, 'T1') });
+    expect(plain.status).toBe(200);
+    const plainActions = plain.body.vacs.flatMap((c: any) => c.credentialSubject.authority.actions as string[]);
+    expect(plainActions).not.toContain('vwc:issue');
+    // Under witnessTier T2 the held T2 VAC is incomplete, so refresh re-issues with vwc:issue.
+    const res = await call('POST', '/authority/refresh', { session: sessionOf(w.did, 'T2'), policy: pT2 });
+    expect(res.status).toBe(200);
+    expect(res.body.issued).toBe(true);
+    const actions = res.body.vacs[0].credentialSubject.authority.actions as string[];
+    expect(actions).toContain('vwc:issue');
+    expect(actions).not.toContain('event:convene');
+    wSession = { subject: w.did, pod: POD_DID, tier: 'T2', authorities: actions };
+  });
+
+  it('a T2 witness witnesses a pair via POST /witness with no event; the VWC is bound to a meeting Trust Task', async () => {
+    edge12 = relationship(p1, p2);
+    const res = await call('POST', '/witness', {
+      session: wSession,
+      body: { vrcA: edge12.vrcA, vrcB: edge12.vrcB, evidence: 'same-event', place: { placeId: 'huc12:101900050301', lat: 40.02, lon: -105.28, name: 'Farmers market' } },
+    });
+    expect(res.status).toBe(201);
+    vwc12 = res.body.vwc;
+    task = res.body.task;
+    expect(task.id).toMatch(/^meet-[2-7a-z]{13}$/);
+    expect(task.kind).toBe('meeting');
+    expect(task.title).toMatch(/^Meeting witnessed by did:key:/);
+    expect(task.title.length).toBeLessThan(w.did.length + 25);
+    expect(task.conveners).toEqual([w.did]);
+    expect(task.attestation).toBe(true);
+    expect(task.placeId).toBe('huc12:101900050301');
+    expect(Date.parse(task.startsAt)).toBe(NOW.getTime());
+    expect(Date.parse(task.endsAt) - Date.parse(task.startsAt)).toBe(3600_000);
+    expect(task.taskDocument.type).toBe('org.bioregion.event.attestation');
+    expect(task.taskDocument.kind).toBe('meeting');
+    expect(task.taskDocument.location).toMatchObject({ placeId: 'huc12:101900050301', name: 'Farmers market' });
+    expect(task.taskDigest).toBe(digestMultibase(task.taskDocument));
+    expect((await verifyDocument(task.taskDocument, resolver)).ok).toBe(true);
+    expect(vwc12.issuer).toBe(POD_DID);
+    expect(vwc12.credentialSubject['witnessedBy']).toBe(w.did);
+    expect(vwc12.credentialSubject['edgeParties']).toEqual([p1.did, p2.did]);
+    expect(vwc12.credentialSubject['taskContext']).toBe(task.id);
+    expect(vwc12.credentialSubject['taskDigestMultibase']).toBe(task.taskDigest);
+    expect((await verifyDocument(vwc12 as any, resolver)).ok).toBe(true);
+    const stored = await run((ctx) => ctx.db.query('SELECT witness_tier FROM witness_refs WHERE digest = $1', [digestMultibase(vwc12)]));
+    expect(stored[0].witness_tier).toBe('T2');
+  });
+
+  it('a pair is still witnessed once per pod: the same witness recovers it without a new meeting; others are refused', async () => {
+    const count = async () => Number((await run((ctx) => ctx.db.query(`SELECT COUNT(*) AS n FROM events WHERE kind = 'meeting'`)))[0].n);
+    const before = await count();
+    const again = await call('POST', '/witness', { session: wSession, body: { vrcA: edge12.vrcB, vrcB: edge12.vrcA, evidence: 'liveness' } });
+    expect(again.status).toBe(200);
+    expect(again.body.existing).toBe(true);
+    expect(again.body.task.id).toBe(task.id);
+    expect(digestMultibase(again.body.vwc)).toBe(digestMultibase(vwc12));
+    expect(await count()).toBe(before);
+    const other = await call('POST', '/witness', { session: stewardSession, body: { vrcA: edge12.vrcA, vrcB: edge12.vrcB, evidence: 'same-event' } });
+    expect(other.status).toBe(409);
+    expect(other.body.code).toBe('ALREADY_WITNESSED');
+    // And at a scheduled event too.
+    const atEvent = await call('POST', `/events/${gathering.id}/witness`, { session: stewardSession, body: { vrcA: edge12.vrcA, vrcB: edge12.vrcB, evidence: 'same-event' } });
+    expect(atEvent.status).toBe(409);
+    expect(await count()).toBe(before);
+  });
+
+  it('refuses self-witness and a malformed pair at /witness', async () => {
+    const own = relationship(w, p3);
+    const self = await call('POST', '/witness', { session: wSession, body: { vrcA: own.vrcA, vrcB: own.vrcB, evidence: 'same-event' } });
+    expect(self.status).toBe(403);
+    expect(self.body.code).toBe('SELF_WITNESS');
+    const half = await call('POST', '/witness', { session: wSession, body: { vrcA: own.vrcA, evidence: 'same-event' } });
+    expect(half.status).toBe(400);
+    expect(half.body.code).toBe('BAD_PAIR');
+    const badPlace = await call('POST', '/witness', { session: wSession, body: { ...relationship(p3, p4), evidence: 'same-event', place: { lat: 200 } } });
+    expect(badPlace.status).toBe(400);
+  });
+
+  it('both parties apply with the meeting VWC and are admitted at T1', async () => {
+    const a = await admit(p1, vwc12, edge12.both);
+    const b = await admit(p2, vwc12, edge12.both, pT2);
+    for (const r of [a, b]) {
+      const actions = [...(r.vacs[0]!.credentialSubject['authority'].actions as string[])].sort();
+      expect(actions).toEqual([...tierDefaultActions('T1')].sort());
+    }
+    expect(await memberRow(p1.did)).toMatchObject({ tier: 'T1', effective_tier: 'T1' });
+    expect(await memberRow(p2.did)).toMatchObject({ tier: 'T1', effective_tier: 'T1' });
+  });
+
+  it('admission.witnessTier T3 refuses admission when the witness was T2 at witness time', async () => {
+    const e = relationship(p3, p4);
+    const res = await call('POST', '/witness', { session: wSession, body: { vrcA: e.vrcA, vrcB: e.vrcB, evidence: 'liveness' } });
+    expect(res.status).toBe(201);
+    const refused = await apply(p3, res.body.vwc, e.both, pT3);
+    expect(refused.status).toBe(403);
+    expect(refused.body.code).toBe('WITNESS_INVALID');
+    expect(refused.body.message).toMatch(/T3/);
+    // The tier recorded at witness time counts, not today's: promoting the witness later does not help.
+    await run((ctx) => recordGovernanceTier(ctx, w.did, 'T3', 'operator', 'elected steward'));
+    const still = await apply(p3, res.body.vwc, e.both, pT3);
+    expect(still.status).toBe(403);
+    await run((ctx) => recordGovernanceTier(ctx, w.did, 'T2', 'operator', 'term ended'));
+    // Under a T2 (or unset) witness tier the same VWC admits.
+    await admit(p3, res.body.vwc, e.both, pT2);
+  });
+
+  it('a T1 member without vwc:issue cannot witness', async () => {
+    const e = relationship(generateKeyPair(), generateKeyPair());
+    const res = await call('POST', '/witness', { session: sessionOf(p1.did, 'T1'), body: { vrcA: e.vrcA, vrcB: e.vrcB, evidence: 'same-event' } });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('MISSING_AUTHORITY');
+    // Even under a permissive policy T1 gains nothing.
+    expect(tierActions({ policy: pT2 }, 'T1')).not.toContain('vwc:issue');
+  });
+
+  it('meetings are hidden from the public events list; stewards list them with ?kind=meeting', async () => {
+    const pub = await call('GET', '/events');
+    const ids = pub.body.events.map((e: any) => e.id) as string[];
+    expect(ids).toContain(gathering.id);
+    expect(ids.some((id) => id.startsWith('meet-'))).toBe(false);
+    expect(pub.body.events.every((e: any) => e.kind === 'event')).toBe(true);
+    const anon = await call('GET', '/events?kind=meeting');
+    expect(anon.status).toBe(401);
+    const member = await call('GET', '/events?kind=meeting', { session: wSession });
+    expect(member.status).toBe(403);
+    const st = await call('GET', '/events?kind=meeting', { session: stewardSession });
+    expect(st.status).toBe(200);
+    const meetings = st.body.events as any[];
+    expect(meetings.map((e) => e.id)).toContain(task.id);
+    expect(meetings.every((e) => e.kind === 'meeting')).toBe(true);
+    expect((await call('GET', '/events?kind=party')).status).toBe(400);
+    // A meeting is still readable by id (a VWC names it as its task context).
+    expect((await call('GET', `/events/${task.id}`)).body.kind).toBe('meeting');
+  });
+
+  it('GET /steward/witnesses reports witness volume; witnessVolume windows by days', async () => {
+    const res = await call('GET', '/steward/witnesses', { session: stewardSession });
+    expect(res.status).toBe(200);
+    const mine = res.body.witnesses.find((x: any) => x.witness === w.did);
+    expect(mine).toMatchObject({ witness: w.did, pairs: 2, atMeetings: 2, atEvents: 0, admitted: 3 });
+    const st = res.body.witnesses.find((x: any) => x.witness === steward.did);
+    expect(st.atEvents).toBeGreaterThanOrEqual(1);
+    expect((await call('GET', '/steward/witnesses', { session: wSession })).status).toBe(403);
+    expect((await call('GET', '/steward/witnesses?sinceDays=-1', { session: stewardSession })).status).toBe(400);
+    const later = new Date(NOW.getTime() + 10 * DAY);
+    const recent = await run((ctx) => witnessVolume(ctx, 5), later);
+    expect(recent.find((x) => x.witness === w.did)).toBeUndefined();
+    const wide = await run((ctx) => witnessVolume(ctx, 30), later);
+    expect(wide.find((x) => x.witness === w.did)?.pairs).toBe(2);
   });
 });
