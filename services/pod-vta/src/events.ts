@@ -8,14 +8,6 @@ import { addDays, bad, isObject, json, toIso, toMs } from './util.js';
 export const WITNESS_VALIDITY_DAYS = 365;
 export const SMOKE_PREFIX = 'smoke-';
 
-/**
- * VTA side table (pod schema) keeping each issued VWC so a convener whose response was lost can recover it.
- * Created lazily like the trust index's tables; candidate for a pod migration.
- */
-export async function ensureVtaTables(db: VtaContext['db']): Promise<void> {
-  await db.query('CREATE TABLE IF NOT EXISTS vta_witness_credentials (digest text PRIMARY KEY, vwc jsonb NOT NULL)');
-}
-
 const alreadyWitnessed = () => new ServiceError(409, 'ALREADY_WITNESSED', 'This relationship has already been witnessed in this pod.');
 
 /** An event that may witness: a real attestation event, or the provisioning smoke's own event. */
@@ -222,7 +214,6 @@ export async function witnessEdge(
   if (edgeParties.includes(convener)) {
     throw new ServiceError(403, 'SELF_WITNESS', 'A convener cannot witness their own relationship.');
   }
-  await ensureVtaTables(ctx.db);
   const recovered = await existingWitness(ctx, pair.digest, convener);
   if (recovered) return recovered;
   const now = ctx.now();
