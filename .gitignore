@@ -1,0 +1,12 @@
+node_modules
+dist
+.next
+.turbo
+.env
+.env.*
+!.env.example
+.vercel
+.superpowers
+coverage
+*.log
+.DS_Store
