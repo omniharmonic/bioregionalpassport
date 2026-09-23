@@ -3,7 +3,7 @@ import { copy } from '@passport/tenant-config';
 import { loadPod } from '@/lib/pod';
 import { describeRequirement, greeting, tierName } from '@/lib/podCopy';
 import { isStewardSession, podLinks } from '@/lib/podNav';
-import { currentPodBase } from '@/lib/podRequest';
+import { currentPlatformOrigin, currentPodBase } from '@/lib/podRequest';
 import { getSession } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
@@ -12,10 +12,15 @@ const TIERS = new Set(['T0', 'T1', 'T2', 'T3', 'T4']);
 
 export default async function PodHome({ params }: PageProps<'/p/[slug]'>) {
   const { slug } = await params;
-  const [pod, base, session] = await Promise.all([loadPod(slug), currentPodBase(slug), getSession().catch(() => null)]);
+  const [pod, base, session, platformOrigin] = await Promise.all([
+    loadPod(slug),
+    currentPodBase(slug),
+    getSession().catch(() => null),
+    currentPlatformOrigin(),
+  ]);
   const { manifest } = pod;
   const { title, lede } = greeting(manifest);
-  const tiles = podLinks(manifest, base, { steward: isStewardSession(session, pod.did) }).filter((l) => l.key !== 'home');
+  const tiles = podLinks(manifest, base, { steward: isStewardSession(session, pod.did), platformOrigin }).filter((l) => l.key !== 'home');
   const mySession = session && session.pod === pod.did ? session : null;
   const tier = mySession?.tier && TIERS.has(mySession.tier) ? (mySession.tier as Tier) : null;
 

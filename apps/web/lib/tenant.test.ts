@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { isPodHostPassthrough, isWalletPath, resolveSlug, walletRedirectUrl, slugFromHost, slugFromPath } from './tenant';
+import {
+  isPlatformOnlyPodPath,
+  isPodHostPassthrough,
+  isWalletPath,
+  platformOriginFor,
+  podSectionRedirectUrl,
+  resolveSlug,
+  walletRedirectUrl,
+  slugFromHost,
+  slugFromPath,
+} from './tenant';
 
 const cfg = { platformDomain: 'bioregionalpassport.org', customDomains: { 'commons.boulder.org': 'boulder' } };
 
@@ -98,5 +108,27 @@ describe('wallet canonical origin', () => {
   it('keeps protocol and port for <slug>.localhost', () => {
     const u = walletRedirectUrl(new URL('http://boulder.localhost:3000/wallet?join=boulder'), 'boulder', 'bioregionalpassport.org');
     expect(u.toString()).toBe('http://localhost:3000/wallet?join=boulder&pod=boulder');
+  });
+});
+
+describe('pod-host sections served from the platform origin', () => {
+  it('lists grants, circulation and merchant (and subpaths) only', () => {
+    for (const p of ['/grants', '/grants/', '/grants/r1', '/circulation', '/circulation/steward', '/merchant']) expect(isPlatformOnlyPodPath(p), p).toBe(true);
+    for (const p of ['/', '/map', '/directory', '/events', '/governance', '/steward', '/grantsx', '/wallet']) expect(isPlatformOnlyPodPath(p), p).toBe(false);
+  });
+  it('platformOriginFor maps <slug>.localhost to localhost and everything else to https://<platform>', () => {
+    expect(platformOriginFor(new URL('http://boulder.localhost:3000/x'), 'bioregionalpassport.org')).toBe('http://localhost:3000');
+    expect(platformOriginFor(new URL('http://boulder.bioregionalpassport.org/x'), 'BioregionalPassport.org')).toBe('https://bioregionalpassport.org');
+    expect(platformOriginFor(new URL('https://passport.boulder.coop/x'), 'bioregionalpassport.org')).toBe('https://bioregionalpassport.org');
+  });
+  it('podSectionRedirectUrl strips an existing /p/<slug> prefix and keeps the query', () => {
+    expect(podSectionRedirectUrl(new URL('https://passport.boulder.coop/grants?r=1'), 'boulder', 'bioregionalpassport.org')?.toString()).toBe(
+      'https://bioregionalpassport.org/p/boulder/grants?r=1',
+    );
+    expect(podSectionRedirectUrl(new URL('https://boulder.bioregionalpassport.org/p/boulder/circulation'), 'boulder', 'bioregionalpassport.org')?.toString()).toBe(
+      'https://bioregionalpassport.org/p/boulder/circulation',
+    );
+    expect(podSectionRedirectUrl(new URL('https://boulder.bioregionalpassport.org/events'), 'boulder', 'bioregionalpassport.org')).toBeNull();
+    expect(podSectionRedirectUrl(new URL('https://boulder.bioregionalpassport.org/p/boulder'), 'boulder', 'bioregionalpassport.org')).toBeNull();
   });
 });

@@ -68,22 +68,52 @@ export function isPodHostPassthrough(pathname: string): boolean {
 export const isWalletPath = (pathname: string): boolean => /^\/wallet(\/|$)/.test(pathname);
 
 /**
+ * Pod sections that read the wallet's IndexedDB in the browser (credits, grants voting, merchant mode). The
+ * wallet lives on the platform origin only (ADR-032), so on a pod host these are redirected to
+ * `<platform>/p/<slug>/…`. Home, map, directory, events, governance and steward stay on the pod host.
+ */
+export const PLATFORM_ONLY_POD_SECTIONS = ['grants', 'circulation', 'merchant'] as const;
+
+const PLATFORM_ONLY_RE = new RegExp(`^/(?:${PLATFORM_ONLY_POD_SECTIONS.join('|')})(?:/|$)`);
+
+/** Whether a pod-relative path (`/grants`, `/circulation/receipt/x`, …) must be served from the platform origin. */
+export const isPlatformOnlyPodPath = (podPath: string): boolean => PLATFORM_ONLY_RE.test(podPath);
+
+/**
+ * The platform origin for a request that arrived on `host`: `<slug>.localhost[:port]` → `localhost[:port]` over
+ * the same protocol; every other host → `https://<platformDomain>`.
+ */
+export function platformOriginFor(url: URL, platformDomain: string): string {
+  const host = normalizeHost(url.host);
+  if (host === 'localhost' || host.endsWith('.localhost')) {
+    const port = url.port ? `:${url.port}` : '';
+    return `${url.protocol}//localhost${port}`;
+  }
+  return `https://${platformDomain.toLowerCase()}`;
+}
+
+/**
  * The wallet's one canonical origin is the platform host: IndexedDB is per origin, so a wallet on every pod
  * host would split one person's passport into several. A pod host's `/wallet…` redirects there with
  * `?pod=<slug>` (other query parameters kept). `<slug>.localhost[:port]` redirects to `localhost[:port]`
  * over the same protocol; every other host to `https://<platformDomain>`.
  */
 export function walletRedirectUrl(url: URL, slug: string, platformDomain: string): URL {
-  const host = normalizeHost(url.host);
-  const target = new URL(url.toString());
-  if (host === 'localhost' || host.endsWith('.localhost')) {
-    target.hostname = 'localhost';
-  } else {
-    target.protocol = 'https:';
-    target.host = platformDomain.toLowerCase();
-  }
+  const target = new URL(`${url.pathname}${url.search}`, platformOriginFor(url, platformDomain));
   target.searchParams.set('pod', slug);
   return target;
+}
+
+/**
+ * A pod host's wallet-dependent section (`/grants…`, `/circulation…`, `/merchant…`, also when addressed as
+ * `/p/<slug>/…`) redirects to `<platform origin>/p/<slug><path>` with the query kept, or `null` when the path
+ * stays on the pod host.
+ */
+export function podSectionRedirectUrl(url: URL, slug: string, platformDomain: string): URL | null {
+  const prefix = `/p/${slug}`;
+  const podPath = url.pathname === prefix ? '/' : url.pathname.startsWith(`${prefix}/`) ? url.pathname.slice(prefix.length) : url.pathname;
+  if (!isPlatformOnlyPodPath(podPath)) return null;
+  return new URL(`${prefix}${podPath}${url.search}`, platformOriginFor(url, platformDomain));
 }
 
 /** `/p/<slug>/…` → slug. */

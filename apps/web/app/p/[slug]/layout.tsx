@@ -5,7 +5,7 @@ import { PodNav } from '@/components/PodNav';
 import { platformDomain } from '@/lib/env';
 import { loadPod } from '@/lib/pod';
 import { isStewardSession, podLinks } from '@/lib/podNav';
-import { currentPodBase } from '@/lib/podRequest';
+import { currentPlatformOrigin, currentPodBase } from '@/lib/podRequest';
 import { getSession } from '@/lib/session';
 import { themeSource } from '@/lib/theme';
 
@@ -24,8 +24,8 @@ export default async function PodLayout({ children, params }: LayoutProps<'/p/[s
   const { slug } = await params;
   const pod = await loadPod(slug);
   const { manifest } = pod;
-  const [base, session] = await Promise.all([currentPodBase(slug), getSession().catch(() => null)]);
-  const links = podLinks(manifest, base, { steward: isStewardSession(session, pod.did) });
+  const [base, session, platformOrigin] = await Promise.all([currentPodBase(slug), getSession().catch(() => null), currentPlatformOrigin()]);
+  const links = podLinks(manifest, base, { steward: isStewardSession(session, pod.did), platformOrigin });
   const manifestHref = `${base}/.well-known/bioregion.json`;
   const domain = platformDomain();
 

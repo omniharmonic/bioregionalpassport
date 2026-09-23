@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { isPodHostPassthrough, isWalletPath, slugFromHost, walletRedirectUrl } from './lib/tenant';
+import { isPodHostPassthrough, isWalletPath, podSectionRedirectUrl, slugFromHost, walletRedirectUrl } from './lib/tenant';
 
 /**
  * Tenant routing (B2 §2.3). A pod host (`<slug>.<PLATFORM_DOMAIN>`,
@@ -11,7 +11,10 @@ import { isPodHostPassthrough, isWalletPath, slugFromHost, walletRedirectUrl } f
  * `POD_HOST_PASSTHROUGH`). `/wallet…` on a pod host redirects (307) to the
  * wallet's one canonical origin, the platform host, with `?pod=<slug>`; the
  * session it opens there reaches pod pages through the platform-wide cookie
- * (`sessionCookieDomain` in `lib/cookies.ts`).
+ * (`sessionCookieDomain` in `lib/cookies.ts`). The wallet-dependent pod
+ * sections `/grants`, `/circulation` and `/merchant` (and their subpaths) read
+ * that same IndexedDB, so on a pod host they redirect (307) to
+ * `<platform>/p/<slug><path>` with the query kept (ADR-032).
  */
 
 function customDomains(): Record<string, string> {
@@ -38,13 +41,18 @@ export function proxy(request: NextRequest) {
   }
 
   const { pathname } = request.nextUrl;
-  if (isWalletPath(pathname)) {
+  const publicUrl = (): URL => {
     const forwardedProto = request.headers.get('x-forwarded-proto');
     const url = new URL(request.nextUrl.toString());
     if (host) url.host = host;
     if (forwardedProto === 'http' || forwardedProto === 'https') url.protocol = `${forwardedProto}:`;
-    return NextResponse.redirect(walletRedirectUrl(url, slug, platformDomain), 307);
+    return url;
+  };
+  if (isWalletPath(pathname)) {
+    return NextResponse.redirect(walletRedirectUrl(publicUrl(), slug, platformDomain), 307);
   }
+  const section = podSectionRedirectUrl(publicUrl(), slug, platformDomain);
+  if (section) return NextResponse.redirect(section, 307);
 
   headers.set('x-pod', slug);
   headers.set('x-pod-host', '1');

@@ -50,6 +50,36 @@ describe('proxy', () => {
     expect(local.headers.get('location')).toBe('http://localhost:3000/wallet?pod=boulder');
   });
 
+  it('redirects (307) the wallet-dependent sections on a pod host to <platform>/p/<slug>/…, keeping the query', () => {
+    const cases: [string, string][] = [
+      ['https://boulder.bioregionalpassport.org/grants', 'https://bioregionalpassport.org/p/boulder/grants'],
+      ['https://boulder.bioregionalpassport.org/grants/r1/propose?x=1', 'https://bioregionalpassport.org/p/boulder/grants/r1/propose?x=1'],
+      ['https://boulder.bioregionalpassport.org/circulation', 'https://bioregionalpassport.org/p/boulder/circulation'],
+      ['https://boulder.bioregionalpassport.org/circulation/receipt/abc?y=2', 'https://bioregionalpassport.org/p/boulder/circulation/receipt/abc?y=2'],
+      ['https://boulder.bioregionalpassport.org/merchant', 'https://bioregionalpassport.org/p/boulder/merchant'],
+      ['https://boulder.bioregionalpassport.org/p/boulder/merchant/', 'https://bioregionalpassport.org/p/boulder/merchant/'],
+      ['http://boulder.localhost:3000/circulation?a=b', 'http://localhost:3000/p/boulder/circulation?a=b'],
+    ];
+    for (const [from, to] of cases) {
+      const res = run(from);
+      expect(res.status, from).toBe(307);
+      expect(res.headers.get('location'), from).toBe(to);
+    }
+  });
+
+  it('keeps home, map, directory, events, governance and steward on the pod host (no redirect)', () => {
+    for (const path of ['/', '/map', '/directory', '/events', '/events/e1', '/governance', '/steward', '/grantsx', '/merchants']) {
+      const res = run(`https://boulder.bioregionalpassport.org${path}`);
+      expect(res.headers.get('location'), path).toBeNull();
+      expect(rewriteOf(res), path).not.toBeNull();
+    }
+  });
+
+  it('does not redirect the wallet-dependent sections on the platform host', () => {
+    const res = run('https://bioregionalpassport.org/p/boulder/grants');
+    expect(res.headers.get('location')).toBeNull();
+  });
+
   it('leaves the platform host alone and drops a client x-pod outside /api', () => {
     const res = run('https://bioregionalpassport.org/wallet', { 'x-pod': 'boulder' });
     expect(rewriteOf(res)).toBeNull();
