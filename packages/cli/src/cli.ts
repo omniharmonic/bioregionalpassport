@@ -29,7 +29,7 @@ export interface CliIo {
 export const USAGE = `passport — Bioregional Passport operator CLI
 
 Usage:
-  passport bioregion create --manifest <file|boulder|tenant-zero> [--json]
+  passport bioregion create --manifest <file|boulder|tenant-zero> [--allow-downgrade] [--json]
   passport bioregion verify <slug> [--json]
   passport bioregion export <slug>          (JSON bundle to stdout)
   passport bioregion list [--json]
@@ -45,12 +45,20 @@ class UsageError extends Error {}
 
 const BUILT_IN: Record<string, unknown> = { boulder: boulderManifest, 'tenant-zero': tenantZeroManifest };
 
-async function importOptional(name: string): Promise<any> {
+/**
+ * Imports an optional service package; returns `undefined` only when that exact package is not
+ * installed (`ERR_MODULE_NOT_FOUND` naming the specifier). Any other failure — a missing build,
+ * a missing transitive dependency, a throw at load — is rethrown.
+ */
+export async function importOptional(name: string, importer: (s: string) => Promise<any> = (s) => import(s)): Promise<any> {
   try {
-    const specifier = name; // variable specifier: these services are optional at build time
-    return await import(specifier);
-  } catch {
-    return undefined;
+    return await importer(name);
+  } catch (e) {
+    const err = e as { code?: string; message?: string } | undefined;
+    if (err?.code === 'ERR_MODULE_NOT_FOUND' && String(err.message ?? '').includes(`Cannot find package '${name}'`)) {
+      return undefined;
+    }
+    throw e;
   }
 }
 
@@ -93,7 +101,12 @@ export async function run(argv: string[], io: CliIo = {}): Promise<number> {
     parsed = parseArgs({
       args: argv,
       allowPositionals: true,
-      options: { manifest: { type: 'string', short: 'm' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } },
+      options: {
+        manifest: { type: 'string', short: 'm' },
+        json: { type: 'boolean' },
+        'allow-downgrade': { type: 'boolean' },
+        help: { type: 'boolean', short: 'h' },
+      },
     });
   } catch (e) {
     err(`${e instanceof Error ? e.message : String(e)}\n\n${USAGE}`);
@@ -142,6 +155,7 @@ export async function run(argv: string[], io: CliIo = {}): Promise<number> {
           db: d,
           platformDomain,
           masterKey: k,
+          allowDowngrade: values['allow-downgrade'] === true,
           ...(deps.seedRecords ? { deps: { seedRecords: deps.seedRecords } } : {}),
         });
         if (values.json) out(JSON.stringify(result, null, 2));
@@ -169,7 +183,9 @@ export async function run(argv: string[], io: CliIo = {}): Promise<number> {
         else {
           out(`Verify ${arg}${report.did ? `  ${report.did}` : ''}`);
           out(formatChecks(report.checks));
-          out(report.ok ? 'All checks passed.' : 'Some checks failed.');
+          const failed = report.checks.filter((c) => !c.ok).length;
+          const skipped = report.skipped > 0 ? ` ${report.skipped} check${report.skipped === 1 ? '' : 's'} skipped.` : '';
+          out(report.ok ? `All checks passed.${skipped}` : `${failed} check${failed === 1 ? '' : 's'} failed.${skipped}`);
         }
         return report.ok ? 0 : 1;
       }

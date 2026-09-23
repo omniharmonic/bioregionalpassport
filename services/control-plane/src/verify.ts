@@ -17,12 +17,17 @@ export interface VerifyReport {
   ok: boolean;
   slug: string;
   did?: string;
+  /** Number of checks skipped because an optional dependency or module was absent. */
+  skipped: number;
   startedAt: string;
   finishedAt: string;
   checks: VerifyCheck[];
 }
 
-/** Helpers handed to optional smoke hooks so they can sign as the pod and resolve its DID offline. */
+/**
+ * Helpers handed to optional smoke hooks so they can sign as the pod and resolve its DID offline.
+ * The signer never exposes the private key.
+ */
 export interface SmokeHelpers {
   signer: PodSigner;
   resolver: DidResolver;
@@ -93,7 +98,12 @@ export async function verifyPod(input: VerifyInput): Promise<VerifyReport> {
       const doc = await didDocumentFor(db, slug, platformDomain);
       if (!doc) throw new Error('The pod has no DID document (no key).');
       if (doc.id !== pod.did) throw new Error(`DID document id ${doc.id} does not match the pod DID ${pod.did}.`);
-      resolver = createResolver({ staticDocs: { [doc.id]: doc } });
+      resolver = createResolver({
+        staticDocs: { [doc.id]: doc },
+        webFetch: async (url) => {
+          throw new Error(`no network in verify (refused to fetch ${url})`);
+        },
+      });
       signer = await loadPodSigner(db, slug, masterKey);
       const probe = signer.sign({ type: 'org.bioregion.controlPlane.probe', pod: pod.did, nonce: randomNonce() });
       const res = await verifyDocument(probe, resolver);
@@ -153,6 +163,7 @@ export async function verifyPod(input: VerifyInput): Promise<VerifyReport> {
   const report: VerifyReport = {
     ok: checks.every((c) => c.ok),
     slug,
+    skipped: checks.filter((c) => c.skipped).length,
     ...(pod ? { did: pod.did } : {}),
     startedAt,
     finishedAt,

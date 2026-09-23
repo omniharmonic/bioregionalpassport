@@ -1,4 +1,4 @@
-import { generateKeyPair, signDocument } from '@passport/credential-core';
+import { generateKeyPair } from '@passport/credential-core';
 import type { Db } from '@passport/db';
 import { migratePod, pendingMigrations, podSchema, withPod } from '@passport/db';
 import {
@@ -30,8 +30,11 @@ export interface ProvisionResult {
 }
 
 export interface ProvisionDeps {
-  /** Seeds demo open records (appview, Task 10). May report its own step status. */
-  seedRecords?: (ctx: PodContext) => Promise<void | { status?: StepStatus; detail?: string }>;
+  /**
+   * Seeds demo open records (appview, Task 10), inside `withPod`. The step status is derived from the
+   * `records` row count before/after, so an idempotent seeder reports `unchanged` on re-runs.
+   */
+  seedRecords?: (ctx: PodContext) => Promise<void | { detail?: string }>;
 }
 
 export interface ProvisionInput {
@@ -42,6 +45,27 @@ export interface ProvisionInput {
   masterKey: string;
   now?: () => Date;
   deps?: ProvisionDeps;
+  /** Allow a manifest that removes existing `governance.anchors` or lowers `$schema` (default false). */
+  allowDowngrade?: boolean;
+  /**
+   * Create-only mode (`POST /pods`): refuse with 409 `POD_EXISTS` when the pod is already active
+   * and the manifest differs. Re-running with an identical manifest is still a no-op.
+   */
+  refuseUpdate?: boolean;
+}
+
+/** `https://bioregion.org/schemas/manifest/v1.2` → `[1, 2]` (missing parts are 0). */
+export function schemaVersion(schema: string): number[] {
+  const m = schema.match(/\/v(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+  return m ? [Number(m[1] ?? 0), Number(m[2] ?? 0), Number(m[3] ?? 0)] : [0, 0, 0];
+}
+
+function compareVersions(a: number[], b: number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
 }
 
 const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
@@ -71,10 +95,39 @@ export async function provisionPod(input: ProvisionInput): Promise<ProvisionResu
   };
   const notes: string[] = [];
   if (incoming.identity.did !== did) notes.push(`identity.did ${incoming.identity.did} replaced by ${did} (the platform hosts the DID document)`);
+  const hash = manifestHash(unsigned);
+
+  // Guards against clobbering an existing pod (before anything is written).
+  let pod = await podRow(db, slug);
+  let removedAnchors: string[] = [];
+  let schemaLowered = false;
+  if (pod && pod.status === 'active' && pod.manifest_hash && pod.manifest_hash !== hash) {
+    if (input.refuseUpdate) {
+      throw new ServiceError(
+        409,
+        'POD_EXISTS',
+        `This pod already exists; use PUT /pods/${slug}/manifest to update it.`,
+      );
+    }
+    const oldAnchors = pod.manifest.governance?.anchors ?? [];
+    removedAnchors = oldAnchors.filter((a) => !unsigned.governance.anchors.includes(a));
+    schemaLowered = compareVersions(schemaVersion(unsigned.$schema), schemaVersion(pod.manifest.$schema)) < 0;
+    if ((removedAnchors.length > 0 || schemaLowered) && !input.allowDowngrade) {
+      const reasons = [
+        ...(removedAnchors.length ? [`removes anchor(s) ${removedAnchors.join(', ')}`] : []),
+        ...(schemaLowered ? [`lowers $schema from ${pod.manifest.$schema} to ${unsigned.$schema}`] : []),
+      ];
+      throw new ServiceError(
+        409,
+        'DOWNGRADE_REFUSED',
+        `This manifest ${reasons.join(' and ')}, which would downgrade pod ${slug}.`,
+        'Re-run with allowDowngrade (CLI --allow-downgrade) if this is intended.',
+      );
+    }
+  }
   steps.push({ name: 'validate', status: 'unchanged', ...(notes.length ? { detail: notes.join('; ') } : {}) });
 
   // 2. pod-key ----------------------------------------------------------------------------
-  let pod = await podRow(db, slug);
   if (!pod) {
     // Placeholder row: pod_keys references pods(slug). Completed in the manifest step.
     await db.query(
@@ -95,7 +148,7 @@ export async function provisionPod(input: ProvisionInput): Promise<ProvisionResu
   if (!key) {
     const fresh = generateKeyPair();
     const kid = `${did}#key-1`;
-    const encrypted = await encryptPrivateKey(fresh.privateKey, masterKey);
+    const encrypted = await encryptPrivateKey(fresh.privateKey, masterKey, `${slug}|${kid}`);
     await db.query(
       'insert into platform.pod_keys (slug, kid, public_key_multibase, encrypted_private_key) values ($1, $2, $3, $4) on conflict do nothing',
       [slug, kid, fresh.publicKeyMultibase, encrypted],
@@ -107,7 +160,6 @@ export async function provisionPod(input: ProvisionInput): Promise<ProvisionResu
   }
   // Decrypting here fails fast (with a clear message) when the master key is wrong.
   const signer = await loadPodSigner(db, slug, masterKey);
-  const signingKey = signer.keyPair;
 
   // 3. did-document -----------------------------------------------------------------------
   steps.push({
@@ -131,7 +183,7 @@ export async function provisionPod(input: ProvisionInput): Promise<ProvisionResu
     const rows = await tx.query<{ n: number }>('select count(*)::int as n from policy_versions');
     if ((rows[0]?.n ?? 0) > 0) return false;
     const at = now();
-    const signed = signDocument(defaultTrustPolicy(did), signingKey, { created: at.toISOString() });
+    const signed = signer.sign(defaultTrustPolicy(did), { created: at.toISOString() });
     await tx.query('insert into policy_versions (version, policy, signed_at) values ($1, $2, $3)', [
       signed.version,
       JSON.stringify(signed),
@@ -142,7 +194,6 @@ export async function provisionPod(input: ProvisionInput): Promise<ProvisionResu
   steps.push({ name: 'trust-policy', status: policyCreated ? 'created' : 'unchanged', ...(policyCreated ? { detail: 'version 1' } : {}) });
 
   // 6. manifest ---------------------------------------------------------------------------
-  const hash = manifestHash(unsigned);
   let signedManifest: BioregionManifest;
   pod = await podRow(db, slug);
   if (pod && pod.manifest_hash === hash && pod.status === 'active' && pod.manifest.proof) {
@@ -150,7 +201,8 @@ export async function provisionPod(input: ProvisionInput): Promise<ProvisionResu
     steps.push({ name: 'manifest', status: 'unchanged', detail: hash });
   } else {
     const firstTime = !pod?.manifest_hash;
-    signedManifest = signDocument(unsigned, signingKey, { created: now().toISOString() }) as BioregionManifest;
+    const signedAt = now().toISOString();
+    signedManifest = signer.sign(unsigned, { created: signedAt }) as BioregionManifest;
     await db.query(
       `insert into platform.pods (slug, did, name, manifest, manifest_hash, status, updated_at)
        values ($1, $2, $3, $4, $5, 'active', now())
@@ -158,7 +210,20 @@ export async function provisionPod(input: ProvisionInput): Promise<ProvisionResu
          manifest_hash = excluded.manifest_hash, status = 'active', updated_at = now()`,
       [slug, did, signedManifest.identity.name, JSON.stringify(signedManifest), hash],
     );
-    steps.push({ name: 'manifest', status: firstTime ? 'created' : 'updated', detail: hash });
+    const versionRows = await db.query<{ v: number }>(
+      'insert into platform.manifest_versions (slug, version, manifest, manifest_hash, signed_at) ' +
+        'select $1, coalesce(max(version), 0) + 1, $2, $3, $4 from platform.manifest_versions where slug = $1 returning version as v',
+      [slug, JSON.stringify(signedManifest), hash, signedAt],
+    );
+    const downgrade = [
+      ...(removedAnchors.length ? [`removed anchors: ${removedAnchors.join(', ')}`] : []),
+      ...(schemaLowered ? ['$schema lowered'] : []),
+    ];
+    steps.push({
+      name: 'manifest',
+      status: firstTime ? 'created' : 'updated',
+      detail: [`version ${versionRows[0]?.v ?? '?'}`, hash, ...downgrade].join('; '),
+    });
   }
 
   // 7. registry ---------------------------------------------------------------------------
@@ -197,14 +262,14 @@ export async function provisionPod(input: ProvisionInput): Promise<ProvisionResu
   if (input.deps?.seedRecords) {
     const policy = (await latestPolicy(db, slug)) as TrustPolicy;
     const seedRecords = input.deps.seedRecords;
-    const res = await withPod(db, slug, (tx) =>
-      seedRecords({ slug, podDid: did, db: tx, manifest: signedManifest, policy, now, platformDomain }),
-    );
-    steps.push({
-      name: 'seed-records',
-      status: res?.status ?? 'updated',
-      ...(res?.detail ? { detail: res.detail } : {}),
+    const count = async (tx: Db) => (await tx.query<{ n: number }>('select count(*)::int as n from records'))[0]?.n ?? 0;
+    const { before, after, res } = await withPod(db, slug, async (tx) => {
+      const before = await count(tx);
+      const res = await seedRecords({ slug, podDid: did, db: tx, manifest: signedManifest, policy, now, platformDomain });
+      return { before, after: await count(tx), res };
     });
+    const status: StepStatus = after === before ? 'unchanged' : before === 0 ? 'created' : 'updated';
+    steps.push({ name: 'seed-records', status, detail: res?.detail ?? `${after} records (${after - before} new)` });
   } else {
     steps.push({ name: 'seed-records', status: 'unchanged', detail: 'no seeder configured' });
   }

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTestDb, type Db } from '@passport/db';
 import { boulderManifest } from '@passport/tenant-config';
-import { parseDotEnv, run, type CliIo } from './index.js';
+import { importOptional, parseDotEnv, run, type CliIo } from './index.js';
 
 let db: Db;
 let out: string[];
@@ -45,7 +45,7 @@ describe('passport CLI', () => {
 
     out = [];
     expect(await run(['bioregion', 'verify', 'tenant-zero'], io())).toBe(0);
-    expect(out.join('\n')).toMatch(/All checks passed/);
+    expect(out.join('\n')).toMatch(/All checks passed\. 3 checks skipped\./);
 
     out = [];
     expect(await run(['bioregion', 'export', 'tenant-zero'], io())).toBe(0);
@@ -85,5 +85,46 @@ describe('parseDotEnv', () => {
     expect(
       parseDotEnv(`# comment\nA=1\nexport B="two words"\nC='x#y'\nD=plain # trailing\n\nbad line\nE=`),
     ).toEqual({ A: '1', B: 'two words', C: 'x#y', D: 'plain', E: '' });
+  });
+});
+
+describe('importOptional', () => {
+  const notFound = (msg: string) => Object.assign(new Error(msg), { code: 'ERR_MODULE_NOT_FOUND' });
+
+  it('returns undefined only when the exact package is missing', async () => {
+    expect(await importOptional('@passport/nope', async () => { throw notFound("Cannot find package '@passport/nope' imported from /x/cli.js"); })).toBeUndefined();
+    expect(await importOptional('node:path')).toBeDefined();
+  });
+
+  it('rethrows a missing transitive dependency or any other load error', async () => {
+    await expect(
+      importOptional('@passport/appview', async () => { throw notFound("Cannot find package 'zod' imported from /x/appview/dist/index.js"); }),
+    ).rejects.toThrow(/zod/);
+    await expect(importOptional('@passport/appview', async () => { throw new SyntaxError('bad build'); })).rejects.toThrow(/bad build/);
+  });
+
+  it('really reports a missing package as not found', async () => {
+    expect(await importOptional('@passport/definitely-not-installed')).toBeUndefined();
+  });
+});
+
+describe('verify output', () => {
+  it('exits non-zero only when a check fails', async () => {
+    await run(['bioregion', 'create', '--manifest', 'boulder'], io());
+    out = [];
+    await db.query("update platform.pods set manifest = jsonb_set(manifest, '{identity,name}', '\"Evil\"') where slug = 'boulder'");
+    expect(await run(['bioregion', 'verify', 'boulder'], io())).toBe(1);
+    expect(out.join('\n')).toMatch(/1 check failed\. 3 checks skipped\./);
+  });
+
+  it('create --allow-downgrade permits removing an anchor', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'passport-cli-'));
+    const withA = { ...boulderManifest, governance: { ...boulderManifest.governance, anchors: ['did:key:zA'] } };
+    await writeFile(join(dir, 'a.json'), JSON.stringify(withA));
+    await writeFile(join(dir, 'b.json'), JSON.stringify(boulderManifest));
+    expect(await run(['bioregion', 'create', '--manifest', 'a.json'], io({ cwd: dir }))).toBe(0);
+    expect(await run(['bioregion', 'create', '--manifest', 'b.json'], io({ cwd: dir }))).toBe(1);
+    expect(err.join('\n')).toMatch(/did:key:zA/);
+    expect(await run(['bioregion', 'create', '--manifest', 'b.json', '--allow-downgrade'], io({ cwd: dir }))).toBe(0);
   });
 });

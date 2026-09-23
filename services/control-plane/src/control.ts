@@ -26,9 +26,10 @@ async function requirePod(db: Db, slug: string): Promise<void> {
 
 /** Operator-only control plane routes (mounted under `/api/control`). */
 export function createControlRoutes(opts: ControlRouteOptions = {}): Route<PlatformContext>[] {
-  const provision = (ctx: PlatformContext, manifest: unknown) =>
+  const provision = (ctx: PlatformContext, manifest: unknown, flags: { refuseUpdate?: boolean; allowDowngrade?: boolean } = {}) =>
     provisionPod({
       manifest,
+      ...flags,
       db: ctx.db,
       platformDomain: ctx.platformDomain,
       masterKey: requireMasterKey(ctx, opts),
@@ -41,7 +42,7 @@ export function createControlRoutes(opts: ControlRouteOptions = {}): Route<Platf
       path: '/pods',
       auth: 'operator',
       handler: async (ctx, req) => {
-        const result = await provision(ctx, req.body);
+        const result = await provision(ctx, req.body, { refuseUpdate: true });
         const created = result.steps.some((s) => s.name === 'manifest' && s.status === 'created');
         return { status: created ? 201 : 200, body: result };
       },
@@ -57,7 +58,8 @@ export function createControlRoutes(opts: ControlRouteOptions = {}): Route<Platf
         if (bodySlug !== slug) {
           throw new ServiceError(400, 'SLUG_MISMATCH', `The manifest is for ${String(bodySlug)}, not ${slug}.`, 'A pod slug cannot be changed.');
         }
-        return { body: await provision(ctx, req.body) };
+        const allowDowngrade = ['1', 'true', 'yes'].includes(String(req.query['allowDowngrade'] ?? '').toLowerCase());
+        return { body: await provision(ctx, req.body, { allowDowngrade }) };
       },
     },
     {

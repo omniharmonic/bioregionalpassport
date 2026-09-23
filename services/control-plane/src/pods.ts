@@ -5,7 +5,6 @@ import {
   signDocument,
   type DataIntegrityProof,
   type DidDocument,
-  type KeyPair,
 } from '@passport/credential-core';
 import type { Db } from '@passport/db';
 import { podSchema, quoteIdent } from '@passport/db';
@@ -79,8 +78,6 @@ export interface PodSigner {
   did: string;
   kid: string;
   publicKeyMultibase: string;
-  /** The decrypted key bound to the pod DID, for builders that take a `KeyPair` (e.g. `attenuate`). */
-  keyPair: KeyPair;
   sign<T extends object>(
     doc: T,
     opts?: { proofPurpose?: string; challenge?: string; domain?: string; created?: string },
@@ -93,7 +90,7 @@ export async function loadPodSigner(db: Db, slug: string, masterKey: string): Pr
   if (!pod) throw new Error(`Pod ${slug} is not provisioned.`);
   const key = await podKeyRow(db, slug);
   if (!key) throw new Error(`Pod ${slug} has no signing key.`);
-  const privateKey = await decryptPrivateKey(key.encrypted_private_key, masterKey, slug);
+  const privateKey = await decryptPrivateKey(key.encrypted_private_key, masterKey, slug, `${slug}|${key.kid}`);
   const fragment = key.kid.includes('#') ? key.kid.slice(key.kid.indexOf('#') + 1) : 'key-1';
   const keyPair = keyPairForDid(pod.did, privateKey, fragment);
   if (keyPair.publicKeyMultibase !== key.public_key_multibase) {
@@ -103,7 +100,6 @@ export async function loadPodSigner(db: Db, slug: string, masterKey: string): Pr
     did: pod.did,
     kid: keyPair.kid,
     publicKeyMultibase: keyPair.publicKeyMultibase,
-    keyPair,
     sign: (doc, opts) => signDocument(doc, keyPair, opts),
   };
 }

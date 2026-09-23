@@ -248,3 +248,88 @@ describe('tenantZeroJob', () => {
     expect(await db.query('select * from platform.tenant_zero_runs')).toHaveLength(2);
   });
 });
+
+describe('fix round 1', () => {
+  it('I1: a void seeder reports created, then unchanged on the re-run', async () => {
+    const seedRecords = async (ctx: any) => {
+      await ctx.db.query(
+        "insert into records (uri, collection, bioregion, record) values ('at://tenant-zero/org.bioregion.event/1', 'event', $1, '{}') on conflict do nothing",
+        [ctx.slug],
+      );
+    };
+    const first = await provisionPod({ manifest: tenantZeroManifest, db, platformDomain: DOMAIN, masterKey: MASTER, deps: { seedRecords } });
+    expect(first.steps.find((s) => s.name === 'seed-records')?.status).toBe('created');
+    const second = await provisionPod({ manifest: tenantZeroManifest, db, platformDomain: DOMAIN, masterKey: MASTER, deps: { seedRecords } });
+    expect(second.steps.every((s) => s.status === 'unchanged')).toBe(true);
+  });
+
+  const withAnchors = (anchors: string[]) => ({ ...boulderManifest, governance: { ...boulderManifest.governance, anchors } });
+
+  it('I2: refuses anchor removal, allows it with allowDowngrade, and keeps every signed version', async () => {
+    await provision(withAnchors(['did:key:zA', 'did:key:zB']));
+    await expect(provision(withAnchors(['did:key:zA']))).rejects.toMatchObject({ status: 409, code: 'DOWNGRADE_REFUSED', message: expect.stringContaining('did:key:zB') });
+    const allowed = await provisionPod({ manifest: withAnchors(['did:key:zA']), db, platformDomain: DOMAIN, masterKey: MASTER, allowDowngrade: true });
+    expect(allowed.steps.find((s) => s.name === 'manifest')).toMatchObject({ status: 'updated', detail: expect.stringContaining('removed anchors: did:key:zB') });
+    await provision(withAnchors(['did:key:zA', 'did:key:zC'])); // adding anchors is not a downgrade
+    await provision(withAnchors(['did:key:zA', 'did:key:zC'])); // unchanged: no new version
+    const versions = await db.query<{ version: number; manifest_hash: string; manifest: any }>(
+      "select version, manifest_hash, manifest from platform.manifest_versions where slug = 'boulder' order by version",
+    );
+    expect(versions.map((v) => v.version)).toEqual([1, 2, 3]);
+    expect(versions[0]?.manifest.governance.anchors).toEqual(['did:key:zA', 'did:key:zB']);
+    expect(versions.every((v) => v.manifest.proof)).toBe(true);
+  });
+
+  it('I2: refuses a lower $schema version', async () => {
+    await provision({ ...boulderManifest, $schema: 'https://bioregion.org/schemas/manifest/v1.2' });
+    await expect(provision({ ...boulderManifest, $schema: 'https://bioregion.org/schemas/manifest/v1.1' })).rejects.toMatchObject({ code: 'DOWNGRADE_REFUSED' });
+  });
+
+  it('I2: POST /pods refuses to overwrite an existing active pod with a different manifest', async () => {
+    const ctx: PlatformContext = { db, platformDomain: DOMAIN, masterKey: MASTER };
+    const post = route(createControlRoutes(), 'POST', '/pods');
+    expect((await post.handler(ctx, { params: {}, query: {}, body: tenantZeroManifest })).status).toBe(201);
+    expect((await post.handler(ctx, { params: {}, query: {}, body: tenantZeroManifest })).status).toBe(200);
+    await expect(
+      post.handler(ctx, { params: {}, query: {}, body: { ...tenantZeroManifest, copy: { en: { 'cta.findEvent': 'x' } } } }),
+    ).rejects.toMatchObject({ status: 409, code: 'POD_EXISTS', message: 'This pod already exists; use PUT /pods/tenant-zero/manifest to update it.' });
+    const put = route(createControlRoutes(), 'PUT', '/pods/:slug/manifest');
+    await put.handler(ctx, { params: { slug: 'tenant-zero' }, query: {}, body: { ...tenantZeroManifest, governance: { ...tenantZeroManifest.governance, anchors: ['did:key:zA'] } } });
+    await expect(put.handler(ctx, { params: { slug: 'tenant-zero' }, query: {}, body: tenantZeroManifest })).rejects.toMatchObject({ code: 'DOWNGRADE_REFUSED' });
+    const ok = await put.handler(ctx, { params: { slug: 'tenant-zero' }, query: { allowDowngrade: 'true' }, body: tenantZeroManifest });
+    expect(ok.body.steps.find((s: any) => s.name === 'manifest').status).toBe('updated');
+  });
+
+  it('M2: the pod signer does not expose the private key', async () => {
+    await provision(tenantZeroManifest);
+    const signer = await loadPodSigner(db, 'tenant-zero', MASTER);
+    expect(Object.keys(signer).sort()).toEqual(['did', 'kid', 'publicKeyMultibase', 'sign']);
+  });
+
+  it('M3: verification never fetches over the network', async () => {
+    await provision(boulderManifest);
+    await db.query(
+      "update platform.pods set manifest = jsonb_set(manifest, '{proof,verificationMethod}', '\"did:web:evil.example#key-1\"') where slug = 'boulder'",
+    );
+    const report = await verifyPod({ db, slug: 'boulder', platformDomain: DOMAIN, masterKey: MASTER });
+    expect(report.checks.find((c) => c.name === 'manifest-signature')).toMatchObject({ ok: false, detail: expect.stringMatching(/no network in verify/) });
+  });
+
+  it('I4: the verify report counts skipped checks', async () => {
+    await provision(tenantZeroManifest);
+    const report = await verifyPod({ db, slug: 'tenant-zero', platformDomain: DOMAIN, masterKey: MASTER });
+    expect(report.skipped).toBe(3);
+  });
+
+  it('M1: the key ciphertext is bound to slug|kid and the IV length is checked', async () => {
+    await provision(tenantZeroManifest);
+    await provision(boulderManifest);
+    // Copy tenant-zero's ciphertext onto boulder: the AAD no longer matches.
+    await db.query(
+      "update platform.pod_keys set encrypted_private_key = (select encrypted_private_key from platform.pod_keys where slug = 'tenant-zero') where slug = 'boulder'",
+    );
+    await expect(loadPodSigner(db, 'boulder', MASTER)).rejects.toThrow(/does not match/);
+    await db.query("update platform.pod_keys set encrypted_private_key = 'AAAA.' || split_part(encrypted_private_key, '.', 2) where slug = 'tenant-zero'");
+    await expect(loadPodSigner(db, 'tenant-zero', MASTER)).rejects.toThrow(/3-byte IV; expected 12/);
+  });
+});
