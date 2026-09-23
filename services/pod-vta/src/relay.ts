@@ -9,7 +9,8 @@ export const CHANNEL_RE = /^[a-zA-Z0-9_-]{16,128}$/;
 export const RELAY_TTL_MS = 24 * 60 * 60_000;
 export const RELAY_PAGE = 100;
 export const RELAY_MAX_BODY_BYTES = 64 * 1024;
-const RING_PER_CHANNEL = 500;
+/** A channel holds at most this many live (< 24 h) messages; further appends get 429 `CHANNEL_FULL`. */
+export const RELAY_MAX_PER_CHANNEL = 500;
 
 export interface RelayMessage {
   seq: number;
@@ -24,11 +25,12 @@ export class RelayStore {
   private readonly channels = new Map<string, RelayMessage[]>();
 
   append(channel: string, sender: string, body: unknown, now: Date): RelayMessage {
-    const msg: RelayMessage = { seq: ++this.seq, sender, body, createdAt: now.toISOString() };
-    const list = this.channels.get(channel) ?? [];
-    list.push(msg);
-    if (list.length > RING_PER_CHANNEL) list.splice(0, list.length - RING_PER_CHANNEL);
+    const cutoff = now.getTime() - RELAY_TTL_MS;
+    const list = (this.channels.get(channel) ?? []).filter((m) => Date.parse(m.createdAt) > cutoff);
     this.channels.set(channel, list);
+    if (list.length >= RELAY_MAX_PER_CHANNEL) throw channelFull();
+    const msg: RelayMessage = { seq: ++this.seq, sender, body, createdAt: now.toISOString() };
+    list.push(msg);
     return msg;
   }
 
@@ -42,8 +44,20 @@ export class RelayStore {
 
 export const defaultRelayStore = new RelayStore();
 
+function channelFull(): ServiceError {
+  return new ServiceError(429, 'CHANNEL_FULL', 'This relay channel is full; wait for older messages to expire or use a new channel.');
+}
+
 /** Ceremony messages only (B3 §5); payment messages travel through the gateway, not the relay. */
 function checkBody(body: unknown): void {
+  // Size first, so an oversized body is never parsed.
+  let size: number;
+  try {
+    size = JSON.stringify(body ?? null).length;
+  } catch {
+    throw bad('BAD_MESSAGE', 'The relay only carries ceremony messages, and this one is not valid.');
+  }
+  if (size > RELAY_MAX_BODY_BYTES) throw new ServiceError(413, 'TOO_LARGE', 'This relay message is too large.');
   let type: string;
   try {
     type = parseMessage(body).type;
@@ -51,9 +65,6 @@ function checkBody(body: unknown): void {
     throw bad('BAD_MESSAGE', 'The relay only carries ceremony messages, and this one is not valid.');
   }
   if (type.startsWith('org.bioregion.pay.')) throw bad('BAD_MESSAGE', 'The relay only carries ceremony messages, not payments.');
-  if (new TextEncoder().encode(JSON.stringify(body)).length > RELAY_MAX_BODY_BYTES) {
-    throw new ServiceError(413, 'TOO_LARGE', 'This relay message is too large.');
-  }
 }
 
 function checkChannel(channel: string | undefined): string {
@@ -84,9 +95,14 @@ export async function relayAppend(ctx: VtaContext, backend: RelayBackend, channe
   checkBody(body);
   const now = ctx.now();
   if (backend.platformDb) {
+    const k = key(ctx, channel);
+    const cutoff = new Date(now.getTime() - RELAY_TTL_MS).toISOString();
+    await backend.platformDb.query('DELETE FROM platform.relay_messages WHERE channel = $1 AND created_at <= $2', [k, cutoff]);
+    const [count] = await backend.platformDb.query<{ n: number | string }>('SELECT count(*) AS n FROM platform.relay_messages WHERE channel = $1', [k]);
+    if (Number(count?.n ?? 0) >= RELAY_MAX_PER_CHANNEL) throw channelFull();
     const [row] = await backend.platformDb.query<{ seq: string | number; created_at: unknown }>(
       `INSERT INTO platform.relay_messages (channel, sender, body, created_at) VALUES ($1, $2, $3, $4) RETURNING seq, created_at`,
-      [key(ctx, channel), input['sender'], JSON.stringify(body), now.toISOString()],
+      [k, input['sender'], JSON.stringify(body), now.toISOString()],
     );
     return { seq: Number(row!.seq), createdAt: toIso(row!.created_at)! };
   }

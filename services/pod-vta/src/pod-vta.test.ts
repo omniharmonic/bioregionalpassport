@@ -22,9 +22,10 @@ import { bitAt, decodeEncodedList, readSession } from '@passport/verifier-sdk';
 import { tierDefaultActions, type Tier } from '@passport/vocab';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootstrapSteward, ceremonyBackHalf } from './ceremony.js';
-import { ChallengeStore } from './challenges.js';
+import { issueAuthorities } from './pep.js';
+import { DbChallengeStore, MemoryChallengeStore } from './challenges.js';
 import { createPodVtaRoutes } from './routes.js';
-import { RelayStore } from './relay.js';
+import { RELAY_MAX_PER_CHANNEL, RelayStore } from './relay.js';
 import type { PodSigner, PodVtaDeps, VtaContext, VtaRoute } from './types.js';
 
 const SLUG = 'boulder';
@@ -60,7 +61,7 @@ beforeAll(async () => {
     resolver,
     sessionSecret: SECRET,
     index: { recommendTier: (ctx, did) => recommendTier(ctx, did) },
-    challenges: new ChallengeStore(),
+    challenges: new MemoryChallengeStore(),
     relay: new RelayStore(),
   };
   routes = createPodVtaRoutes(deps);
@@ -139,13 +140,46 @@ async function newEvent(steward: SessionClaims, startsAt = new Date(NOW.getTime(
   return res.body;
 }
 
+/** A signed VRC pair between two personas; the edge digest is the digest of `a`'s half. */
+function relationship(a: KeyPair, b: KeyPair) {
+  const formedAt = NOW.toISOString();
+  const vrcA = signDocument(buildRelationship({ issuer: a.did, subject: b.did, bioregion: SLUG, formedAt, validFrom: formedAt }), a);
+  const vrcB = signDocument(buildRelationship({ issuer: b.did, subject: a.did, bioregion: SLUG, formedAt, validFrom: formedAt }), b);
+  return { vrcA, vrcB, edgeDigest: digestMultibase(vrcA), edgeParties: [a.did, b.did] };
+}
+
+async function witness(session: SessionClaims, eventId: string, edge: { edgeDigest: string; edgeParties: string[] }, extra: Record<string, unknown> = {}) {
+  const res = await call('POST', `/events/${eventId}/witness`, { session, body: { edgeDigest: edge.edgeDigest, edgeParties: edge.edgeParties, evidence: 'same-event', ...extra } });
+  expect(res.status).toBe(201);
+  return res.body.vwc as VerifiableCredential;
+}
+
+async function apply(key: KeyPair, vwc: unknown, creds: VerifiableCredential[]) {
+  return call('POST', '/membership/apply', { body: { vwc, presentation: createPresentation(creds, key, await challenge()) } });
+}
+
+async function admit(key: KeyPair, vwc: unknown, creds: VerifiableCredential[]) {
+  const res = await apply(key, vwc, creds);
+  expect(res.status).toBe(201);
+  const grant = res.body.grant as VerifiableCredential;
+  const ack = signDocument(
+    buildMembershipAck({ member: key.did, pod: POD_DID, grantDigest: digestMultibase(grant), validFrom: NOW.toISOString(), validUntil: grant.validUntil! }),
+    key,
+  );
+  const done = await call('POST', '/membership/ack', { body: { ack } });
+  expect(done.status).toBe(200);
+  return { grant, ack, vacs: done.body.vacs as VerifiableCredential[] };
+}
+
+const memberRow = (did: string) => run(async (ctx) => (await ctx.db.query('SELECT * FROM members WHERE did = $1', [did]))[0]);
+
 describe('pod VTA — ceremony back half', () => {
   const steward = generateKeyPair();
   const alice = generateKeyPair();
   const bob = generateKeyPair();
   const stewardSession = sessionOf(steward.did, 'T3');
   let event: any;
-  let vrcHeldByAlice: VerifiableCredential;
+  let edge: ReturnType<typeof relationship>;
   let vwc: VerifiableCredential;
   let grant: VerifiableCredential;
   let ack: VerifiableCredential;
@@ -157,6 +191,7 @@ describe('pod VTA — ceremony back half', () => {
     const actions = out.vacs[0]!.credentialSubject['authority'].actions as string[];
     expect(actions).toEqual(expect.arrayContaining(['event:convene', 'vwc:issue', 'pep:review']));
     expect((await verifyDocument(out.vacs[0] as any, resolver)).ok).toBe(true);
+    expect(await memberRow(steward.did)).toMatchObject({ tier: 'T3', effective_tier: 'T3' });
   });
 
   it('creates an attestation event with a Trust Task document and digest', async () => {
@@ -172,41 +207,51 @@ describe('pod VTA — ceremony back half', () => {
     expect(one.body.taskDigest).toBe(event.taskDigest);
   });
 
-  it('refuses event creation without event:convene', async () => {
+  it('refuses event creation without event:convene, and authority sessions from another pod', async () => {
     const res = await call('POST', '/events', { session: sessionOf(alice.did, 'T1'), body: { title: 'x', startsAt: NOW.toISOString(), endsAt: new Date(NOW.getTime() + DAY).toISOString() } });
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('MISSING_AUTHORITY');
+    const foreign = await call('GET', '/steward/members', { session: { ...stewardSession, pod: OTHER_POD } });
+    expect(foreign.status).toBe(403);
+    expect(foreign.body.code).toBe('POD_MISMATCH');
   });
 
-  it('two personas form a VRC pair and a VEC; the steward witnesses the edge', async () => {
-    const formedAt = NOW.toISOString();
-    const vrcA = signDocument(buildRelationship({ issuer: alice.did, subject: bob.did, bioregion: SLUG, formedAt, validFrom: formedAt }), alice);
-    const vrcB = signDocument(buildRelationship({ issuer: bob.did, subject: alice.did, bioregion: SLUG, formedAt, validFrom: formedAt }), bob);
-    const vec = signDocument(buildEndorsement({ issuer: bob.did, subject: alice.did, scope: 'lives-here', validFrom: formedAt }), bob);
+  it('two personas form a VRC pair and a VEC; the steward witnesses the edge with both parties named', async () => {
+    edge = relationship(alice, bob);
+    const vec = signDocument(buildEndorsement({ issuer: bob.did, subject: alice.did, scope: 'lives-here', validFrom: NOW.toISOString() }), bob);
     expect((await verifyDocument(vec, resolver)).ok).toBe(true);
-    vrcHeldByAlice = vrcB;
-    const edgeDigest = digestMultibase([vrcA, vrcB].map((v) => digestMultibase(v)).sort());
 
-    const notConvener = await call('POST', `/events/${event.id}/witness`, { session: sessionOf(bob.did, 'T3'), body: { edgeDigest, evidence: 'same-event' } });
+    const notConvener = await call('POST', `/events/${event.id}/witness`, { session: sessionOf(bob.did, 'T3'), body: { edgeDigest: edge.edgeDigest, edgeParties: edge.edgeParties, evidence: 'same-event' } });
     expect(notConvener.status).toBe(403);
     expect(notConvener.body.code).toBe('NOT_CONVENER');
+    const noParties = await call('POST', `/events/${event.id}/witness`, { session: stewardSession, body: { edgeDigest: edge.edgeDigest, evidence: 'same-event' } });
+    expect(noParties.status).toBe(400);
 
-    const res = await call('POST', `/events/${event.id}/witness`, { session: stewardSession, body: { edgeDigest, evidence: 'same-event', subject: alice.did } });
-    expect(res.status).toBe(201);
-    vwc = res.body.vwc;
+    vwc = await witness(stewardSession, event.id, edge);
     expect(vwc.issuer).toBe(POD_DID);
     expect(vwc.credentialSubject['witnessedBy']).toBe(steward.did);
+    expect(vwc.credentialSubject['edgeParties']).toEqual([alice.did, bob.did]);
     expect(vwc.credentialSubject['taskContext']).toBe(event.id);
     expect(vwc.credentialSubject['taskDigestMultibase']).toBe(event.taskDigest);
     expect(Date.parse(vwc.validUntil!) - Date.parse(vwc.validFrom)).toBe(365 * DAY);
     expect((await verifyDocument(vwc as any, resolver)).ok).toBe(true);
   });
 
+  it('refuses the VWC to three unrelated DIDs replaying it (EDGE_NOT_YOURS)', async () => {
+    for (const _ of [1, 2, 3]) {
+      const stranger = generateKeyPair();
+      const own = relationship(stranger, generateKeyPair());
+      const res = await apply(stranger, vwc, [edge.vrcA, edge.vrcB, own.vrcA]);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('EDGE_NOT_YOURS');
+      expect(res.body.message).toBe('This witness credential is for a relationship you are not part of.');
+    }
+  });
+
   it('applies with a VP bound to a fresh challenge and receives a signed grant (idempotently)', async () => {
     const c = await challenge();
     expect(c.domain).toBe(`${SLUG}.${DOMAIN}`);
-    const presentation = createPresentation([vrcHeldByAlice], alice, c);
-    const res = await call('POST', '/membership/apply', { body: { vwc, presentation } });
+    const res = await call('POST', '/membership/apply', { body: { vwc, presentation: createPresentation([edge.vrcA], alice, c) } });
     expect(res.status).toBe(201);
     grant = res.body.grant;
     expect(grant.issuer).toBe(POD_DID);
@@ -214,14 +259,13 @@ describe('pod VTA — ceremony back half', () => {
     expect(grant.credentialSubject['placeIds']).toEqual(['huc12:101900050301']);
     expect(Date.parse(grant.validUntil!) - Date.parse(grant.validFrom)).toBe(90 * DAY);
 
-    const again = await call('POST', '/membership/apply', { body: { vwc, presentation: createPresentation([], alice, await challenge()) } });
+    const again = await apply(alice, vwc, [edge.vrcA]);
     expect(again.status).toBe(200);
     expect(digestMultibase(again.body.grant)).toBe(digestMultibase(grant));
   });
 
   it('refuses an application whose challenge was already used', async () => {
-    const c = await challenge();
-    const presentation = createPresentation([], alice, c);
+    const presentation = createPresentation([edge.vrcA], alice, await challenge());
     expect((await call('POST', '/membership/apply', { body: { vwc, presentation } })).status).toBe(200);
     const replay = await call('POST', '/membership/apply', { body: { vwc, presentation } });
     expect(replay.status).toBe(401);
@@ -267,11 +311,49 @@ describe('pod VTA — ceremony back half', () => {
     expect(vac.credentialStatus.type).toBe('BitstringStatusListEntry');
     expect((await verifyDocument(vac as any, resolver)).ok).toBe(true);
     expect(res.body.explanation.join(' ')).toMatch(/pair is complete/);
+    expect(await memberRow(alice.did)).toMatchObject({ tier: 'T1', effective_tier: 'T1' });
 
     const log = await call('GET', '/steward/vac-log', { session: stewardSession });
     expect(log.body.entries.some((e: any) => e.subject === alice.did && e.tier === 'T1')).toBe(true);
     const members = await call('GET', '/steward/members', { session: stewardSession });
-    expect(members.body.members.find((m: any) => m.did === alice.did)).toMatchObject({ tier: 'T1', status: 'member' });
+    expect(members.body.members.find((m: any) => m.did === alice.did)).toMatchObject({ tier: 'T1', governanceTier: 'T1', status: 'member' });
+  });
+
+  it('admits the other genuine party with the same VWC, and no one else', async () => {
+    const bobDone = await admit(bob, vwc, [edge.vrcA]);
+    expect(bobDone.vacs[0]!.credentialSubject.id).toBe(bob.did);
+    const ref = await run(async (ctx) => (await ctx.db.query('SELECT used_by FROM witness_refs WHERE digest = $1', [digestMultibase(vwc)]))[0]);
+    expect([...ref.used_by].sort()).toEqual([alice.did, bob.did].sort());
+    const carol = generateKeyPair();
+    const third = await apply(carol, vwc, [edge.vrcA]);
+    expect(third.status).toBe(403);
+    expect(third.body.code).toBe('EDGE_NOT_YOURS');
+  });
+
+  it('refuses a VWC that has already admitted two people (WITNESS_USED)', async () => {
+    const dan = generateKeyPair();
+    const erin = generateKeyPair();
+    const e2 = relationship(dan, erin);
+    const v2 = await witness(stewardSession, event.id, e2);
+    await run((ctx) => ctx.db.query(`UPDATE witness_refs SET used_by = '["did:key:zX","did:key:zY"]'::jsonb WHERE digest = $1`, [digestMultibase(v2)]));
+    const res = await apply(dan, v2, [e2.vrcA]);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('WITNESS_USED');
+  });
+
+  it('refuses a VWC whose convener has since lost vwc:issue', async () => {
+    const convener = generateKeyPair();
+    const boot = await run((ctx) => bootstrapSteward(ctx, deps, convener.did));
+    const session = sessionOf(convener.did, 'T3');
+    const ev = await newEvent(session);
+    const fay = generateKeyPair();
+    const e3 = relationship(fay, generateKeyPair());
+    const v3 = await witness(session, ev.id, e3);
+    const revoked = await call('POST', '/authority/revoke', { session: stewardSession, body: { digest: digestMultibase(boot.vacs[0]), reason: 'stepped down' } });
+    expect(revoked.status).toBe(200);
+    const res = await apply(fay, v3, [e3.vrcA]);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('WITNESS_INVALID');
   });
 
   it('opens a member session from the membership pair + VAC; the token reads back', async () => {
@@ -310,7 +392,8 @@ describe('pod VTA — ceremony back half', () => {
     const claims = await readSession(res.body.token, SECRET, NOW);
     expect(claims?.subject).toBe(bob.did);
     expect(claims?.pod).toBeUndefined();
-    const members = await call('POST', '/session', { body: { presentation: createPresentation([], bob, await challenge()) } });
+    const stranger = generateKeyPair();
+    const members = await call('POST', '/session', { body: { presentation: createPresentation([], stranger, await challenge()) } });
     expect(members.status).toBe(401);
     expect(members.body.code).toBe('NO_MEMBERSHIP');
   });
@@ -329,66 +412,97 @@ describe('pod VTA — ceremony back half', () => {
       }),
       otherKey,
     );
-    const res = await call('POST', '/membership/apply', { body: { vwc: foreign, presentation: createPresentation([], carol, await challenge()) } });
+    const res = await apply(carol, foreign, []);
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('WITNESS_INVALID');
     expect(res.body.message).toBe("Admission needs a witness credential from one of this pod's attestation events.");
   });
 
   it('refuses a presentation with a bad proof', async () => {
-    const c = await challenge();
-    const vp = createPresentation([], alice, c);
-    const tampered = { ...vp, holder: bob.did };
-    const res = await call('POST', '/membership/apply', { body: { vwc, presentation: tampered } });
+    const vp = createPresentation([edge.vrcA], alice, await challenge());
+    const res = await call('POST', '/membership/apply', { body: { vwc, presentation: { ...vp, holder: bob.did } } });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('BAD_PROOF');
   });
 
-  it('refresh never lowers a tier before the VAC expires; the recommendation applies after expiry', async () => {
-    // The index recommends T1 for the steward (mocked: the real index reads members.tier as the governance record).
+  it('a governance demotion sticks: effective tier holds until the VAC expires, then follows governance', async () => {
+    const x = generateKeyPair();
+    await run((ctx) => bootstrapSteward(ctx, deps, x.did));
+    const demote = await call('POST', `/steward/members/${encodeURIComponent(x.did)}/tier`, { session: stewardSession, body: { tier: 'T1', reason: 'term ended' } });
+    expect(demote.status).toBe(200);
+    const s = sessionOf(x.did, 'T3');
+    const early = await call('POST', '/authority/refresh', { session: s });
+    expect(early.body.tier).toBe('T3');
+    expect(early.body.explanation.join(' ')).toMatch(/stays at T3 until/);
+    expect(await memberRow(x.did)).toMatchObject({ tier: 'T1', effective_tier: 'T3' });
+
+    const later = await call('POST', '/authority/refresh', { session: s, now: new Date(NOW.getTime() + 91 * DAY) });
+    expect(later.body.tier).toBe('T1');
+    expect(later.body.vacs.map((v: any) => v.credentialSubject.tier)).toEqual(['T1']);
+    const again = await call('POST', '/authority/refresh', { session: s, now: new Date(NOW.getTime() + 92 * DAY) });
+    expect(again.body.tier).toBe('T1');
+    expect(await memberRow(x.did)).toMatchObject({ tier: 'T1', effective_tier: 'T1' });
+  });
+
+  it('a bootstrapped steward keeps T3 after expiry (governance floor), even when the index recommends less', async () => {
     const toT1 = createPodVtaRoutes({ ...deps, index: { recommendTier: async () => ({ tier: 'T1', explanation: ['mocked T1'] }) } });
     const s = sessionOf(steward.did, 'T3');
     const early = await call('POST', '/authority/refresh', { session: s, routes: toT1 });
-    expect(early.status).toBe(200);
     expect(early.body.tier).toBe('T3');
-    expect(early.body.explanation.join(' ')).toMatch(/stays at T3 until/);
-    // The pending downgrade gets its T1 VAC now; the T3 VAC stays valid until it expires.
-    expect(early.body.vacs.map((v: any) => v.credentialSubject.tier).sort()).toEqual(['T1', 'T3']);
-    let rows = await run((ctx) => ctx.db.query('SELECT tier FROM members WHERE did = $1', [steward.did]));
-    expect(rows[0].tier).toBe('T3');
-
-    const again = await call('POST', '/authority/refresh', { session: s, routes: toT1, now: new Date(NOW.getTime() + 30 * DAY) });
-    expect(again.body.tier).toBe('T3');
-    expect(again.body.issued).toBe(false);
-
-    const later = new Date(NOW.getTime() + 91 * DAY);
-    const expired = await call('POST', '/authority/refresh', { session: s, routes: toT1, now: later });
-    expect(expired.body.tier).toBe('T1');
-    expect(expired.body.vacs.map((v: any) => v.credentialSubject.tier)).toEqual(['T1']);
-    rows = await run((ctx) => ctx.db.query('SELECT tier FROM members WHERE did = $1', [steward.did]));
-    expect(rows[0].tier).toBe('T1');
-
-    // With the real index: Alice has no witnessed postings of her own yet, but her T1 VAC is valid.
-    const aliceEarly = await call('POST', '/authority/refresh', { session: sessionOf(alice.did, 'T1') });
-    expect(aliceEarly.status).toBe(200);
-    expect(aliceEarly.body.tier).toBe('T1');
-    expect(aliceEarly.body.vacs.length).toBeGreaterThanOrEqual(1);
-
-    // Restore the steward for the steward-only tests below.
-    await run((ctx) => bootstrapSteward(ctx, deps, steward.did));
+    expect(early.body.issued).toBe(false);
+    const later = await call('POST', '/authority/refresh', { session: s, routes: toT1, now: new Date(NOW.getTime() + 91 * DAY) });
+    expect(later.body.tier).toBe('T3');
+    expect(later.body.issued).toBe(true);
+    expect(await memberRow(steward.did)).toMatchObject({ tier: 'T3', effective_tier: 'T3' });
   });
 
-  it('refresh upgrades at once and renews a VAC that is about to expire', async () => {
+  it('refresh upgrades at once (effective tier only) and renews a VAC that is about to expire', async () => {
+    const aliceReal = await call('POST', '/authority/refresh', { session: sessionOf(alice.did, 'T1') });
+    expect(aliceReal.body.tier).toBe('T1');
     const mocked = createPodVtaRoutes({ ...deps, index: { recommendTier: async () => ({ tier: 'T2', explanation: ['mocked T2'] }) } });
     const up = await call('POST', '/authority/refresh', { session: sessionOf(alice.did, 'T1'), routes: mocked });
     expect(up.body.tier).toBe('T2');
     expect(up.body.issued).toBe(true);
     expect(up.body.vacs[0].credentialSubject.authority.actions).toEqual(tierDefaultActions('T2'));
+    expect(await memberRow(alice.did)).toMatchObject({ tier: 'T1', effective_tier: 'T2' });
     const same = await call('POST', '/authority/refresh', { session: sessionOf(alice.did, 'T2'), routes: mocked });
     expect(same.body.issued).toBe(false);
     const nearExpiry = await call('POST', '/authority/refresh', { session: sessionOf(alice.did, 'T2'), routes: mocked, now: new Date(NOW.getTime() + 85 * DAY) });
     expect(nearExpiry.body.issued).toBe(true);
     expect(nearExpiry.body.tier).toBe('T2');
+  });
+
+  it('a re-applying former member starts again at T1 effective (governance floor), not their old effective tier', async () => {
+    const toT2 = createPodVtaRoutes({ ...deps, index: { recommendTier: async () => ({ tier: 'T2', explanation: ['mocked T2'] }) } });
+    await call('POST', '/authority/refresh', { session: sessionOf(bob.did, 'T1'), routes: toT2 });
+    expect(await memberRow(bob.did)).toMatchObject({ tier: 'T1', effective_tier: 'T2' });
+
+    const later = new Date(NOW.getTime() + 95 * DAY); // grant and VACs expired
+    const ev = await call('POST', '/events', {
+      session: stewardSession,
+      now: later,
+      body: { title: 'Autumn walk', startsAt: new Date(later.getTime() - 3600_000).toISOString(), endsAt: new Date(later.getTime() + 3600_000).toISOString() },
+    });
+    expect(ev.status).toBe(201);
+    const peer = generateKeyPair();
+    const at = later.toISOString();
+    const vrc = signDocument(buildRelationship({ issuer: bob.did, subject: peer.did, bioregion: SLUG, formedAt: at, validFrom: at }), bob);
+    const w = await call('POST', `/events/${ev.body.id}/witness`, {
+      session: stewardSession,
+      now: later,
+      body: { edgeDigest: digestMultibase(vrc), edgeParties: [bob.did, peer.did], evidence: 'same-event' },
+    });
+    expect(w.status).toBe(201);
+    const c = await challenge(later);
+    const applied = await call('POST', '/membership/apply', { now: later, body: { vwc: w.body.vwc, presentation: createPresentation([vrc], bob, c) } });
+    expect(applied.status).toBe(201);
+    const g = applied.body.grant as VerifiableCredential;
+    const a = signDocument(buildMembershipAck({ member: bob.did, pod: POD_DID, grantDigest: digestMultibase(g), validFrom: at, validUntil: g.validUntil! }), bob);
+    const done = await call('POST', '/membership/ack', { now: later, body: { ack: a } });
+    expect(done.status).toBe(200);
+    expect(done.body.member.tier).toBe('T1');
+    expect(done.body.vacs[0].credentialSubject.tier).toBe('T1');
+    expect(await memberRow(bob.did)).toMatchObject({ tier: 'T1', effective_tier: 'T1' });
   });
 
   it('refuses refresh for a session of another pod', async () => {
@@ -415,22 +529,34 @@ describe('pod VTA — ceremony back half', () => {
     expect((await call('GET', '/status/other')).status).toBe(404);
   });
 
-  it('files and adjudicates a dispute with a pod-signed adjudication', async () => {
+  it('files and adjudicates a dispute; the adjudication subject comes from the dispute, not the body', async () => {
     const filed = await call('POST', '/disputes', { session: sessionOf(alice.did, 'T1'), body: { subjectDigest: digestMultibase(vwc), reason: 'I was not there' } });
     expect(filed.status).toBe(201);
     expect(filed.body.status).toBe('open');
     const list = await call('GET', '/steward/disputes', { session: stewardSession });
     expect(list.body.disputes.map((d: any) => d.id)).toContain(filed.body.id);
-    const done = await call('POST', `/steward/disputes/${filed.body.id}/adjudicate`, { session: stewardSession, body: { outcome: 'upheld', subjectDid: alice.did } });
+    const done = await call('POST', `/steward/disputes/${filed.body.id}/adjudicate`, { session: stewardSession, body: { outcome: 'upheld', subjectDid: bob.did } });
     expect(done.status).toBe(200);
     expect(done.body.status).toBe('adjudicated');
     const adj = done.body.adjudication;
     expect(adj.issuer).toBe(POD_DID);
+    expect(adj.credentialSubject.id).toBe(alice.did);
     expect(adj.credentialSubject.adjudicatedBy).toBe(steward.did);
+    expect(adj.credentialSubject.object.digestMultibase).toBe(digestMultibase(vwc));
     expect(adj.credentialSubject.predicate).toBe('bioregion:adjudicated');
     expect((await verifyDocument(adj, resolver)).ok).toBe(true);
     const noAuth = await call('GET', '/steward/disputes', { session: sessionOf(alice.did, 'T1') });
     expect(noAuth.status).toBe(403);
+  });
+});
+
+describe('pod VTA — PEP audit log', () => {
+  it('leaves no unsigned vac_issuance_log row when signing fails', async () => {
+    const broken: PodSigner = { did: POD_DID, kid: podKey.kid, sign: () => { throw new Error('key unavailable'); } };
+    const before = await run(async (ctx) => Number((await ctx.db.query('SELECT count(*)::int AS n FROM vac_issuance_log'))[0].n));
+    await expect(run((ctx) => issueAuthorities(ctx, { podSigner: broken }, 'did:key:zNobody', 'T1', []))).rejects.toThrow(/key unavailable/);
+    const after = await run(async (ctx) => Number((await ctx.db.query('SELECT count(*)::int AS n FROM vac_issuance_log'))[0].n));
+    expect(after).toBe(before);
   });
 });
 
@@ -450,15 +576,47 @@ describe('pod VTA — governance', () => {
 });
 
 describe('pod VTA — challenges', () => {
-  it('are single-use and scoped to the pod', () => {
-    const store = new ChallengeStore();
-    const c = store.issue('boulder', 'boulder.x', NOW);
-    expect(() => store.consume('tenant-zero', c.challenge, NOW)).toThrow(/not issued by this pod/);
-    const c2 = store.issue('boulder', 'boulder.x', NOW);
-    expect(store.consume('boulder', c2.challenge, NOW)).toEqual({ challenge: c2.challenge, domain: 'boulder.x' });
-    expect(() => store.consume('boulder', c2.challenge, NOW)).toThrow(/already been used/);
-    const c3 = store.issue('boulder', 'boulder.x', NOW);
-    expect(() => store.consume('boulder', c3.challenge, new Date(NOW.getTime() + 5 * 60_000))).toThrow(/expired/);
+  it('in memory: single-use, scoped to the pod, expire by time', async () => {
+    const store = new MemoryChallengeStore();
+    const c = await store.issue('boulder', 'boulder.x', NOW);
+    await expect(store.consume('tenant-zero', c.challenge, NOW)).rejects.toThrow(/not issued by this pod/);
+    const c2 = await store.issue('boulder', 'boulder.x', NOW);
+    expect(await store.consume('boulder', c2.challenge, NOW)).toEqual({ challenge: c2.challenge, domain: 'boulder.x' });
+    await expect(store.consume('boulder', c2.challenge, NOW)).rejects.toThrow(/already been used/);
+    const c3 = await store.issue('boulder', 'boulder.x', NOW);
+    await expect(store.consume('boulder', c3.challenge, new Date(NOW.getTime() + 5 * 60_000))).rejects.toThrow(/expired/);
+    // No size-based eviction: an early challenge survives a flood.
+    const early = await store.issue('boulder', 'boulder.x', NOW);
+    for (let i = 0; i < 12_000; i++) await store.issue('boulder', 'boulder.x', NOW);
+    expect((await store.consume('boulder', early.challenge, NOW)).challenge).toBe(early.challenge);
+  });
+
+  it('in platform.relay_messages: single-use, scoped, expiring', async () => {
+    const store = new DbChallengeStore(db);
+    const c = await store.issue('boulder', 'boulder.x', NOW);
+    const rows = await db.query(`SELECT body FROM platform.relay_messages WHERE channel = 'challenge:boulder' AND body->>'challenge' = $1`, [c.challenge]);
+    expect(rows[0].body).toMatchObject({ challenge: c.challenge, domain: 'boulder.x', expiresAt: c.expiresAt });
+    await expect(store.consume('tenant-zero', c.challenge, NOW)).rejects.toThrow(/not issued by this pod/);
+    expect(await store.consume('boulder', c.challenge, NOW)).toEqual({ challenge: c.challenge, domain: 'boulder.x' });
+    await expect(store.consume('boulder', c.challenge, NOW)).rejects.toThrow(/already been used/);
+    const used = await db.query(`SELECT body FROM platform.relay_messages WHERE channel = 'challenge:boulder' AND body->>'challenge' = $1`, [c.challenge]);
+    expect(used[0].body.usedAt).toBe(NOW.toISOString());
+    const c2 = await store.issue('boulder', 'boulder.x', NOW);
+    await expect(store.consume('boulder', c2.challenge, new Date(NOW.getTime() + 5 * 60_000))).rejects.toThrow(/expired/);
+  });
+
+  it('routes use the platform store when platformDb is configured', async () => {
+    const withDb = createPodVtaRoutes({ ...deps, challenges: undefined, platformDb: db });
+    const c = (await call('GET', '/challenge', { routes: withDb, unscoped: true })).body;
+    const rows = await db.query(`SELECT 1 FROM platform.relay_messages WHERE channel = 'challenge:boulder' AND body->>'challenge' = $1`, [c.challenge]);
+    expect(rows).toHaveLength(1);
+    const visitor = generateKeyPair();
+    const presentation = createPresentation([], visitor, c);
+    const ok = await call('POST', '/session/visitor', { routes: withDb, unscoped: true, body: { presentation } });
+    expect(ok.status).toBe(200);
+    const replay = await call('POST', '/session/visitor', { routes: withDb, unscoped: true, body: { presentation } });
+    expect(replay.status).toBe(401);
+    expect(replay.body.code).toBe('BAD_CHALLENGE');
   });
 });
 
@@ -499,35 +657,76 @@ describe('pod VTA — relay (ADR-22)', () => {
     const short = await call('POST', '/relay/short', { ...opts, body: { sender: 'x', body: msg(9) } });
     expect(short.status).toBe(400);
     expect(short.body.code).toBe('BAD_CHANNEL');
+    // Oversized bodies are refused on size before any parsing (not a valid message either).
+    const huge = await call('POST', `/relay/${channel}`, { ...opts, body: { sender: 'x', body: { type: 'nope', pad: 'x'.repeat(70 * 1024) } } });
+    expect(huge.status).toBe(413);
+    expect(huge.body.code).toBe('TOO_LARGE');
+  }
+
+  async function fill(opts: { routes?: VtaRoute[]; unscoped?: boolean }) {
+    const full = 'full_channel_0123456789';
+    for (let i = 0; i < RELAY_MAX_PER_CHANNEL; i++) {
+      const res = await call('POST', `/relay/${full}`, { ...opts, body: { sender: 's', body: msg(i) } });
+      expect(res.status).toBe(201);
+    }
+    const over = await call('POST', `/relay/${full}`, { ...opts, body: { sender: 's', body: msg(999) } });
+    expect(over.status).toBe(429);
+    expect(over.body.code).toBe('CHANNEL_FULL');
+    // After 24 h the old messages are pruned on append and the channel accepts again.
+    const next = await call('POST', `/relay/${full}`, { ...opts, body: { sender: 's', body: msg(1000) }, now: new Date(NOW.getTime() + 25 * 3600_000) });
+    expect(next.status).toBe(201);
   }
 
   it('appends and lists in order with a 24 h cutoff (in-memory ring)', async () => {
-    await exercise({ routes: createPodVtaRoutes({ ...deps, relay: new RelayStore() }) });
+    const r = createPodVtaRoutes({ ...deps, relay: new RelayStore() });
+    await exercise({ routes: r });
+    await fill({ routes: r });
   });
 
   it('appends and lists in order with a 24 h cutoff (platform.relay_messages)', async () => {
-    await exercise({ routes: createPodVtaRoutes({ ...deps, platformDb: db }), unscoped: true });
-    const rows = await db.query('SELECT channel FROM platform.relay_messages LIMIT 1');
+    const r = createPodVtaRoutes({ ...deps, platformDb: db });
+    await exercise({ routes: r, unscoped: true });
+    const rows = await db.query(`SELECT channel FROM platform.relay_messages WHERE channel LIKE 'boulder:%' LIMIT 1`);
     expect(rows[0].channel).toBe(`${SLUG}:${channel}`);
+    await fill({ routes: r, unscoped: true });
+    const left = await db.query(`SELECT count(*)::int AS n FROM platform.relay_messages WHERE channel = 'boulder:full_channel_0123456789'`);
+    expect(left[0].n).toBe(1);
   });
 });
 
 describe('pod VTA — in-process smoke', () => {
-  it('ceremonyBackHalf runs witness → apply → ack → VACs with the control plane helpers', async () => {
+  const counts = () =>
+    run(async (ctx) => {
+      const out: Record<string, number> = {};
+      for (const t of ['members', 'events', 'witness_refs', 'vac_issuance_log']) {
+        out[t] = Number((await ctx.db.query(`SELECT count(*)::int AS n FROM ${t}`))[0].n);
+      }
+      return out;
+    });
+
+  it('ceremonyBackHalf runs witness → apply → ack → VACs with the control plane helpers and leaves no rows', async () => {
+    const before = await counts();
     const res = await run((ctx) => ceremonyBackHalf(ctx, { signer: podSigner, resolver }));
     expect(res.ok).toBe(true);
+    expect(res.eventId.startsWith('smoke-')).toBe(true);
     expect(res.vacs[0]!.credentialSubject['authority'].actions).toEqual(tierDefaultActions('T1'));
     expect(res.ack.credentialSubject['digestMultibase']).toBe(digestMultibase(res.grant));
+    expect(await counts()).toEqual(before);
+    const list = await call('GET', '/events');
+    expect(list.body.events.some((e: any) => e.id.startsWith('smoke-'))).toBe(false);
   });
 
-  it('ceremonyBackHalf accepts an explicit convener session, applicant key and event', async () => {
+  it('ceremonyBackHalf accepts an explicit convener session, applicant key and event, and keeps pre-existing rows', async () => {
     const convener = generateKeyPair();
     await run((ctx) => bootstrapSteward(ctx, deps, convener.did));
     const session = sessionOf(convener.did, 'T3');
     const event = await newEvent(session);
+    const before = await counts();
     const applicantKey = generateKeyPair();
     const res = await run((ctx) => ceremonyBackHalf(ctx, deps, { convenerSession: session, applicantKey, event }));
     expect(res.member).toBe(applicantKey.did);
     expect(res.eventId).toBe(event.id);
+    expect(await counts()).toEqual(before);
+    expect(await memberRow(convener.did)).toBeDefined();
   });
 });

@@ -42,19 +42,22 @@ export async function listDisputes(ctx: VtaContext) {
 
 /**
  * Adjudication (`bioregion:adjudicated`) issued by the pod on behalf of the steward — same ruling as VWCs:
- * `issuer = ctx.podDid`, `credentialSubject.adjudicatedBy = <steward DID>`.
+ * `issuer = ctx.podDid`, `credentialSubject.adjudicatedBy = <steward DID>`. The credential subject is the member
+ * who filed the dispute (from the dispute row, never from the request body) and `object.digestMultibase` is the
+ * disputed credential's digest.
  */
 export async function adjudicateDispute(ctx: VtaContext, deps: Pick<PodVtaDeps, 'podSigner'>, steward: string, id: string, body: unknown) {
-  if (!isObject(body) || typeof body['outcome'] !== 'string' || !body['outcome'].trim() || typeof body['subjectDid'] !== 'string' || !body['subjectDid'].startsWith('did:')) {
-    throw bad('BAD_REQUEST', 'An adjudication needs an outcome and the DID it concerns.');
+  if (!isObject(body) || typeof body['outcome'] !== 'string' || !body['outcome'].trim()) {
+    throw bad('BAD_REQUEST', 'An adjudication needs an outcome.');
   }
   const [row] = await ctx.db.query<DisputeRow>('SELECT * FROM disputes WHERE id = $1', [id]);
   if (!row) throw new ServiceError(404, 'NOT_FOUND', 'There is no dispute with that id in this pod.');
   if (row.status !== 'open') throw new ServiceError(409, 'ALREADY_ADJUDICATED', 'This dispute has already been adjudicated.');
+  if (!row.filed_by) throw new ServiceError(409, 'NO_SUBJECT', 'This dispute does not record who filed it, so it cannot be adjudicated.');
   const now = ctx.now();
   const unsigned: VerifiableCredential = buildAdjudication({
     steward: ctx.podDid,
-    subject: body['subjectDid'],
+    subject: row.filed_by,
     disputedDigest: row.subject_digest ?? '',
     outcome: body['outcome'].trim(),
     validFrom: now.toISOString(),

@@ -84,9 +84,21 @@ export async function issueAuthorities(
     statusListIndex: id,
     statusListCredential: statusListUrl(ctx),
   };
-  const vac = deps.podSigner.sign(unsigned, { created: validFrom });
-  await ctx.db.query('UPDATE vac_issuance_log SET credential = $2 WHERE id = $1', [id, JSON.stringify(vac)]);
+  let vac: VerifiableCredential;
+  try {
+    vac = deps.podSigner.sign(unsigned, { created: validFrom });
+    await ctx.db.query('UPDATE vac_issuance_log SET credential = $2 WHERE id = $1', [id, JSON.stringify(vac)]);
+  } catch (e) {
+    // Never leave an unsigned audit row behind (nested transactions reuse the outer one, so delete explicitly).
+    await ctx.db.query('DELETE FROM vac_issuance_log WHERE id = $1 AND credential IS NULL', [id]);
+    throw e;
+  }
   return { vacs: [vac], explanation: lines };
+}
+
+/** PEP-only write: the effective tier and until when the VAC carrying it is valid (migration 0006). */
+export async function setEffective(ctx: VtaContext, did: string, tier: Tier, until: string | null): Promise<void> {
+  await ctx.db.query('UPDATE members SET effective_tier = $2, effective_until = $3 WHERE did = $1', [did, tier, until]);
 }
 
 /** Latest unrevoked VAC log row for `did`, or undefined. */
@@ -121,15 +133,16 @@ export async function validVacs(ctx: VtaContext, did: string): Promise<VacLogRow
 const maxTier = (a: Tier, b: Tier): Tier => (tierRank(a) >= tierRank(b) ? a : b);
 
 /**
- * `POST /authority/refresh`. The index recommends; the PEP decides (FR-TR-2):
- * - the effective tier never drops below the highest tier of a VAC the member still holds (valid, unrevoked):
- *   downgrades apply at that VAC's expiry, never mid-round. With `downgradeAtExpiryOnly: false` in the signed
- *   policy the recommendation applies at once and higher-tier VACs are revoked;
+ * `POST /authority/refresh`. The index recommends; governance sets a floor; the PEP decides (FR-TR-2):
+ * - entitled tier = max(recommended tier, governance tier `members.tier`);
+ * - effective tier = max(entitled, highest tier of a VAC the member still holds, valid and unrevoked): downgrades
+ *   apply at that VAC's expiry, never mid-round. With `downgradeAtExpiryOnly: false` in the signed policy,
+ *   VACs above the entitled tier are revoked at once;
  * - upgrades apply immediately;
- * - the PEP keeps the member holding a fresh VAC at the recommended tier: one is issued when none is held at
- *   that tier or the held one expires within 7 days (so a pending downgrade gets its lower-tier VAC ahead of
- *   the higher one's expiry, and nothing is ever renewed above the recommendation);
- * - `members.tier` records the effective tier.
+ * - the member always holds a fresh VAC at the entitled tier: one is issued when none is held at that tier or it
+ *   expires within 7 days, so nothing is ever renewed above the entitlement;
+ * - the PEP writes ONLY `members.effective_tier` / `effective_until`; `members.tier` is the governance record the
+ *   trust index reads and is never written here.
  */
 export async function refreshAuthorities(ctx: VtaContext, deps: Pick<PodVtaDeps, 'podSigner' | 'index'>, did: string): Promise<RefreshResult> {
   const [member] = await ctx.db.query<{ did: string; tier: string; ack: unknown; grant: unknown }>(
@@ -140,16 +153,19 @@ export async function refreshAuthorities(ctx: VtaContext, deps: Pick<PodVtaDeps,
     throw new ServiceError(403, 'NO_MEMBERSHIP', 'Only members of this pod can refresh their authorities.', 'Complete the membership ceremony first.');
   }
   const rec = await deps.index.recommendTier(ctx, did);
+  const governance: Tier = isTier(member.tier) ? member.tier : 'T0';
+  const entitled = maxTier(rec.tier, governance);
   const now = ctx.now().getTime();
   const explanation = [...rec.explanation];
+  if (tierRank(governance) > tierRank(rec.tier)) explanation.push(`Pod governance has recorded you at tier ${governance}.`);
   const atExpiryOnly = ctx.policy.downgradeAtExpiryOnly !== false;
 
   let valid = await validVacs(ctx, did);
   const heldOf = (rows: VacLogRow[]) => rows.reduce<Tier>((t, r) => (isTier(r.tier) ? maxTier(t, r.tier) : t), 'T0');
   let held = heldOf(valid);
 
-  if (!atExpiryOnly && tierRank(held) > tierRank(rec.tier)) {
-    const above = valid.filter((r) => isTier(r.tier) && tierRank(r.tier) > tierRank(rec.tier));
+  if (!atExpiryOnly && tierRank(held) > tierRank(entitled)) {
+    const above = valid.filter((r) => isTier(r.tier) && tierRank(r.tier) > tierRank(entitled));
     for (const r of above) {
       await ctx.db.query('UPDATE vac_issuance_log SET revoked_at = $2 WHERE id = $1', [r.id, ctx.now().toISOString()]);
     }
@@ -158,8 +174,8 @@ export async function refreshAuthorities(ctx: VtaContext, deps: Pick<PodVtaDeps,
     held = heldOf(valid);
   }
 
-  const tier = maxTier(held, rec.tier);
-  if (tierRank(held) > tierRank(rec.tier)) {
+  const tier = maxTier(held, entitled);
+  if (tierRank(held) > tierRank(entitled)) {
     const top = valid.find((r) => r.tier === held)!;
     explanation.push(
       `Your tier stays at ${held} until your current authority expires on ${toIso(top.valid_until)!.slice(0, 10)}; changes apply at expiry, never mid-round.`,
@@ -167,19 +183,18 @@ export async function refreshAuthorities(ctx: VtaContext, deps: Pick<PodVtaDeps,
   }
 
   let issued = false;
-  if (rec.tier !== 'T0') {
-    const atRec = valid.find((r) => r.tier === rec.tier);
-    const fresh = atRec && toMs(atRec.valid_until) - now >= REFRESH_WINDOW_DAYS * DAY_MS;
+  if (entitled !== 'T0') {
+    const atEntitled = valid.find((r) => r.tier === entitled);
+    const fresh = atEntitled && toMs(atEntitled.valid_until) - now >= REFRESH_WINDOW_DAYS * DAY_MS;
     if (!fresh) {
-      const out = await issueAuthorities(ctx, deps, did, rec.tier, [`Refreshed from the trust index recommendation (${rec.tier}).`]);
+      const out = await issueAuthorities(ctx, deps, did, entitled, [`Refreshed: recommended ${rec.tier}, governance tier ${governance}.`]);
       issued = true;
       explanation.push(out.explanation[out.explanation.length - 1]!);
       valid = await validVacs(ctx, did);
     }
   }
-  if (tier !== member.tier) {
-    await ctx.db.query('UPDATE members SET tier = $2 WHERE did = $1', [did, tier]);
-  }
+  const carrying = valid.filter((r) => r.tier === tier).map((r) => toMs(r.valid_until));
+  await setEffective(ctx, did, tier, carrying.length ? new Date(Math.max(...carrying)).toISOString() : null);
   return {
     tier,
     issued,
@@ -187,6 +202,13 @@ export async function refreshAuthorities(ctx: VtaContext, deps: Pick<PodVtaDeps,
     explanation,
     ...(rec.next ? { next: rec.next } : {}),
   };
+}
+
+/** Governance write (steward/operator): records `members.tier`. The PEP applies it at the next refresh. */
+export async function setGovernanceTier(ctx: VtaContext, did: string, tier: Tier, by: string, reason: string): Promise<{ did: string; tier: Tier }> {
+  const rows = await ctx.db.query('UPDATE members SET tier = $2 WHERE did = $1 RETURNING did', [did, tier]);
+  if (!rows.length) throw new ServiceError(404, 'NOT_FOUND', 'There is no member with that DID in this pod.');
+  return { did, tier };
 }
 
 /** `POST /authority/revoke`: sets `revoked_at` on the log row whose credential digest is `digest`. */

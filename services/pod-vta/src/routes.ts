@@ -1,14 +1,15 @@
 import type { VerifiablePresentation } from '@passport/credential-core';
 import { requireAuthority, ServiceError, type RouteRequest } from '@passport/service-kit';
 import { createSession, verifyDTG, type VerifyResult } from '@passport/verifier-sdk';
-import { defaultChallengeStore, podDomain, type ChallengeStore } from './challenges.js';
+import { DbChallengeStore, defaultChallengeStore, podDomain, type ChallengeStore } from './challenges.js';
 import { adjudicateDispute, fileDispute, listDisputes } from './disputes.js';
 import { createEvent, getEvent, listEvents, witnessEdge } from './events.js';
 import { acknowledgeMembership, applyMembership, listMembers } from './membership.js';
-import { refreshAuthorities, revokeAuthority, statusListCredential, statusListUrl, VAC_STATUS_LIST } from './pep.js';
+import { refreshAuthorities, revokeAuthority, setGovernanceTier, statusListCredential, statusListUrl, VAC_STATUS_LIST } from './pep.js';
 import { defaultRelayStore, relayAppend, relayList } from './relay.js';
 import type { PodVtaDeps, VtaContext, VtaRoute } from './types.js';
-import { bad, isObject, json, requireMember, toIso } from './util.js';
+import { bad, isObject, json, requireMember, toIso, toMs } from './util.js';
+import { TIERS, tierRank, type Tier } from '@passport/vocab';
 
 const FORBIDDEN_CODES = new Set(['MISSING_AUTHORITY', 'POD_MISMATCH', 'BROADENED_ATTENUATION', 'CHAIN_TOO_DEEP']);
 
@@ -37,7 +38,7 @@ export async function openSession(ctx: VtaContext, deps: PodVtaDeps, challenges:
   if (requireAuthorityList !== undefined && (!Array.isArray(requireAuthorityList) || !requireAuthorityList.every((a) => typeof a === 'string' && a))) {
     throw bad('BAD_REQUEST', 'requireAuthority must be a list of authority names.');
   }
-  const binding = challenges.consume(ctx.slug, challengeOf(presentation), ctx.now());
+  const binding = await challenges.consume(ctx.slug, challengeOf(presentation), ctx.now());
   let result: VerifyResult;
   try {
     result = await verifyDTG(
@@ -72,8 +73,17 @@ export async function openSession(ctx: VtaContext, deps: PodVtaDeps, challenges:
     const token = await createSession(holderOnly, deps.sessionSecret, 3600, now);
     return { token, subject: result.subject, tier: 'T0', authorities: [], explanation: result.explanation };
   }
-  const token = await createSession(result, deps.sessionSecret, 3600, now);
-  return { token, subject: result.subject, tier: result.tier ?? 'T0', authorities: result.authorities, explanation: result.explanation };
+  // Session tier = the PEP's effective tier while it is current (VAC-derived tier otherwise).
+  const [row] = await ctx.db.query<{ effective_tier: string | null; effective_until: unknown }>(
+    'SELECT effective_tier, effective_until FROM members WHERE did = $1',
+    [result.subject],
+  );
+  let tier = result.tier ?? 'T0';
+  if (row?.effective_tier && (TIERS as readonly string[]).includes(row.effective_tier) && toMs(row.effective_until) > now.getTime()) {
+    tier = row.effective_tier;
+  }
+  const token = await createSession({ ...result, tier }, deps.sessionSecret, 3600, now);
+  return { token, subject: result.subject, tier, authorities: result.authorities, explanation: result.explanation };
 }
 
 async function latestPolicy(ctx: VtaContext): Promise<unknown | null> {
@@ -81,11 +91,16 @@ async function latestPolicy(ctx: VtaContext): Promise<unknown | null> {
   return rows[0] ? json(rows[0].policy) : null;
 }
 
-const need = (req: RouteRequest, scope: string) => requireAuthority(req, scope);
+/** Authority gate: the session must belong to this pod (403 `POD_MISMATCH`) and carry `scope`. */
+function need(ctx: VtaContext, req: RouteRequest, scope: string) {
+  requireMember(ctx, req);
+  return requireAuthority(req, scope);
+}
 
 /** Route table mounted by `apps/web` under `/api/vta`. */
 export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
-  const challenges = deps.challenges ?? defaultChallengeStore;
+  // Challenges persist in platform.relay_messages when a platform database is configured.
+  const challenges = deps.challenges ?? (deps.platformDb ? new DbChallengeStore(deps.platformDb) : defaultChallengeStore);
   const relay = { relay: deps.relay ?? defaultRelayStore, ...(deps.platformDb ? { platformDb: deps.platformDb } : {}) };
 
   return [
@@ -94,7 +109,7 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       method: 'GET',
       path: '/challenge',
       auth: 'none',
-      handler: async (ctx) => ({ body: challenges.issue(ctx.slug, podDomain(ctx), ctx.now()) }),
+      handler: async (ctx) => ({ body: await challenges.issue(ctx.slug, podDomain(ctx), ctx.now()) }),
     },
     {
       method: 'POST',
@@ -139,7 +154,7 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       path: '/events',
       auth: 'authority:event:convene',
       handler: async (ctx, req) => {
-        const s = need(req, 'event:convene');
+        const s = need(ctx, req, 'event:convene');
         return { status: 201, body: await createEvent(ctx, deps, s.subject, req.body) };
       },
     },
@@ -150,7 +165,7 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       path: '/events/:id/witness',
       auth: 'authority:vwc:issue',
       handler: async (ctx, req) => {
-        const s = need(req, 'vwc:issue');
+        const s = need(ctx, req, 'vwc:issue');
         return { status: 201, body: await witnessEdge(ctx, deps, s.subject, req.params['id'] ?? '', req.body) };
       },
     },
@@ -162,7 +177,7 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       auth: 'none',
       handler: async (ctx, req) => {
         const presentation = isObject(req.body) ? req.body['presentation'] : undefined;
-        const binding = challenges.consume(ctx.slug, challengeOf(presentation), ctx.now());
+        const binding = await challenges.consume(ctx.slug, challengeOf(presentation), ctx.now());
         const { grant, existing } = await applyMembership(ctx, deps, req.body, binding);
         return { status: existing ? 200 : 201, body: { grant } };
       },
@@ -193,7 +208,7 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       path: '/authority/revoke',
       auth: 'authority:pep:review',
       handler: async (ctx, req) => {
-        const s = need(req, 'pep:review');
+        const s = need(ctx, req, 'pep:review');
         const b = req.body;
         if (!isObject(b) || typeof b['digest'] !== 'string' || typeof b['reason'] !== 'string' || !b['reason'].trim()) {
           throw bad('BAD_REQUEST', 'Revocation needs the credential digest and a reason.');
@@ -223,7 +238,7 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       path: '/steward/disputes',
       auth: 'authority:pep:review',
       handler: async (ctx, req) => {
-        need(req, 'pep:review');
+        need(ctx, req, 'pep:review');
         return { body: { disputes: await listDisputes(ctx) } };
       },
     },
@@ -232,7 +247,7 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       path: '/steward/disputes/:id/adjudicate',
       auth: 'authority:pep:review',
       handler: async (ctx, req) => {
-        const s = need(req, 'pep:review');
+        const s = need(ctx, req, 'pep:review');
         return { body: await adjudicateDispute(ctx, deps, s.subject, req.params['id'] ?? '', req.body) };
       },
     },
@@ -243,8 +258,24 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       path: '/steward/members',
       auth: 'authority:pep:review',
       handler: async (ctx, req) => {
-        need(req, 'pep:review');
+        need(ctx, req, 'pep:review');
         return { body: { members: await listMembers(ctx) } };
+      },
+    },
+    {
+      // Governance write (the only route that sets members.tier). Stewards may record T0–T3; T4 is operator-only.
+      method: 'POST',
+      path: '/steward/members/:did/tier',
+      auth: 'authority:pep:review',
+      handler: async (ctx, req) => {
+        const s = need(ctx, req, 'pep:review');
+        const b = req.body;
+        const tier = isObject(b) ? b['tier'] : undefined;
+        if (typeof tier !== 'string' || !(TIERS as readonly string[]).includes(tier) || tierRank(tier as Tier) > tierRank('T3')) {
+          throw bad('BAD_REQUEST', 'A steward can record a governance tier from T0 to T3.');
+        }
+        if (!isObject(b) || typeof b['reason'] !== 'string' || !b['reason'].trim()) throw bad('BAD_REQUEST', 'A governance decision needs a reason.');
+        return { body: await setGovernanceTier(ctx, req.params['did'] ?? '', tier as Tier, s.subject, b['reason'].trim()) };
       },
     },
     {
@@ -252,7 +283,7 @@ export function createPodVtaRoutes(deps: PodVtaDeps): VtaRoute[] {
       path: '/steward/vac-log',
       auth: 'authority:pep:review',
       handler: async (ctx, req) => {
-        need(req, 'pep:review');
+        need(ctx, req, 'pep:review');
         const rows = await ctx.db.query<any>('SELECT * FROM vac_issuance_log ORDER BY id DESC LIMIT 500');
         return {
           body: {
