@@ -114,7 +114,8 @@ export async function acceptMembership(wallet: Wallet, client: PodClient, grant:
   const r = await client.ack(grant);
   await wallet.storeCredential(grant, { pod: client.slug });
   await wallet.storeCredential(r.ackCredential, { pod: client.slug });
-  await wallet.replaceVacs(client.slug, r.vacs);
+  // The ack answers with the tier VAC it issued only, so root VACs scoped elsewhere are left as they are.
+  await wallet.replaceVacs(client.slug, r.vacs, { tierOnly: true });
   const until = r.vacs[0]?.validUntil;
   await wallet.updatePod(client.slug, { tier: r.member.tier, joinedAt: wallet.now().toISOString(), ...(until ? { effectiveUntil: until } : {}) });
   await wallet.setExplanation(client.slug, { tier: r.member.tier, explanation: r.explanation });

@@ -248,24 +248,34 @@ export class Wallet {
   }
 
   /**
-   * Replaces the pod's tier authority set with the server's list of currently valid VACs (refresh/ack), marking
-   * older ones superseded so a revoked or lapsed VAC is never presented. Only VACs scoped to the pod itself are
-   * replaced: authority scoped elsewhere (e.g. `pay:receive` for an enterprise the person registered) is not part
-   * of the tier set the pod re-issues, so it stays active.
+   * Replaces the wallet's authority set for `slug` with the server's list of currently valid VACs, marking every
+   * other VAC superseded so a revoked or lapsed VAC is never presented (nor reported by `authorities()`).
+   *
+   * `/authority/refresh` answers with EVERY valid, unrevoked VAC in the pod's `vac_issuance_log` for the member —
+   * tier VACs and root VACs scoped elsewhere alike (e.g. an enterprise owner's `pay:receive`, which is logged and
+   * revocable through the same status list). So anything absent from it is superseded, except credentials that
+   * structurally never appear there: attenuated VACs (`authority.parent` set, e.g. staff `pay:receive` a merchant
+   * owner delegated), which the pod never issues or logs.
+   *
+   * `tierOnly` (membership ack, whose answer carries only the tier VAC it issued): replace only VACs scoped to the
+   * pod itself and leave root VACs scoped elsewhere untouched.
    */
-  async replaceVacs(slug: string, vacs: VerifiableCredential[]): Promise<void> {
+  async replaceVacs(slug: string, vacs: VerifiableCredential[], opts: { tierOnly?: boolean } = {}): Promise<void> {
     const keep = new Set<string>();
     for (const vc of vacs) keep.add(await this.storeCredential(vc, { pod: slug }));
     const pod = await this.db.pods.get(slug);
     const rows = await this.db.credentials.where('pod').equals(slug).toArray();
+    const authorityOf = (r: CredentialRow) => r.raw.credentialSubject?.['authority'] as { scope?: string; parent?: string } | undefined;
     const tierScoped = (r: CredentialRow) => {
-      const scope = r.raw.credentialSubject?.['authority']?.scope;
+      const scope = authorityOf(r)?.scope;
       return scope === undefined || scope === pod?.did || scope === r.issuer;
     };
+    const replaced = (r: CredentialRow) => {
+      if (r.kind !== 'authority' || authorityOf(r)?.parent) return false;
+      return opts.tierOnly ? tierScoped(r) : true;
+    };
     await this.db.credentials.bulkPut(
-      rows
-        .filter((r) => r.kind === 'authority' && tierScoped(r))
-        .map((r) => ({ ...r, status: keep.has(r.digest) ? 'active' : 'superseded' }) as CredentialRow),
+      rows.filter(replaced).map((r) => ({ ...r, status: keep.has(r.digest) ? 'active' : 'superseded' }) as CredentialRow),
     );
   }
 

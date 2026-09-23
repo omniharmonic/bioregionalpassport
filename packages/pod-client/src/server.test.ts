@@ -11,6 +11,8 @@ import { buildPayAuthorization } from './pay.js';
 import { PodError } from './util.js';
 import { createWallet, type Wallet } from './wallet.js';
 import { bootstrapConvener, createHarness, POD_DID, SLUG, type Harness } from './test/harness.js';
+import { statusListUrl } from '@passport/pod-vta';
+import type { SessionClaims } from '@passport/service-kit';
 
 let h: Harness;
 const wallets: Wallet[] = [];
@@ -32,6 +34,47 @@ async function phone() {
   const fetch = h.fetchFor();
   const client = new PodClient({ slug: SLUG, manifest: boulderManifest, baseUrl: '', fetch, persona, db: wallet.db });
   return { wallet, persona, client, jar: fetch.jar, ceremony: new Ceremony({ wallet, relay: client.relay(), pod: SLUG, resolver: h.deps.resolver }) };
+}
+
+/** A root `pay:receive` VAC for an enterprise owner, logged in `vac_issuance_log` exactly as cc-gateway does. */
+async function ownerPayVac(owner: string, enterprise: string) {
+  return h.run(async (ctx) => {
+    const validFrom = new Date().toISOString();
+    const validUntil = new Date(Date.now() + 30 * 86_400_000).toISOString();
+    const [log] = await ctx.db.query<{ id: string | number }>(
+      `INSERT INTO vac_issuance_log (subject_did, actions, tier, policy_version, explanation, issued_at, valid_until)
+       VALUES ($1, $2::jsonb, 'T1', 1, '[]'::jsonb, $3, $4) RETURNING id`,
+      [owner, JSON.stringify(['pay:receive']), validFrom, validUntil],
+    );
+    const id = String(log!.id);
+    const unsigned = buildAuthority({ issuer: POD_DID, subject: owner, scope: enterprise, actions: ['pay:receive'], validFrom, validUntil, tier: 'T1' });
+    unsigned.credentialStatus = { id: `${statusListUrl(ctx)}#${id}`, type: 'BitstringStatusListEntry', statusPurpose: 'revocation', statusListIndex: id, statusListCredential: statusListUrl(ctx) };
+    const vac = h.deps.podSigner.sign(unsigned, { created: validFrom });
+    await ctx.db.query('UPDATE vac_issuance_log SET credential = $2::jsonb WHERE id = $1', [id, JSON.stringify(vac)]);
+    return vac;
+  });
+}
+
+/** Alice met Bob at Carol's event, was witnessed, applied and accepted: a T1 member with a member session. */
+async function admittedMember() {
+  const alice = await phone();
+  const bob = await phone();
+  const carol = await phone();
+  await bootstrapConvener(h, carol.persona.did);
+  carol.jar.session = { subject: carol.persona.did, pod: POD_DID, tier: 'T3', authorities: tierDefaultActions('T3') };
+  const now = Date.now();
+  const ev = await carol.client.createEvent({ title: 'Potluck', startsAt: new Date(now - 60_000).toISOString(), endsAt: new Date(now + 3600_000).toISOString() });
+  const s = await bob.ceremony.host();
+  const j = await alice.ceremony.join(s.inviteJson);
+  await bob.ceremony.pollHost(s);
+  await alice.ceremony.pollJoin(j);
+  await alice.ceremony.requestWitness(ev, bob.persona.did);
+  const [req] = await carol.ceremony.listWitnessRequests(ev);
+  await carol.ceremony.witness(carol.client, ev, req!);
+  await alice.ceremony.pollWitnessResult(ev, bob.persona.did);
+  const grant = await applyForMembership(alice.wallet, alice.client, bob.persona.did);
+  await acceptMembership(alice.wallet, alice.client, grant, { resolver: h.deps.resolver });
+  return { alice, bob, carol };
 }
 
 describe('wallet payloads against the real pod VTA', () => {
@@ -140,20 +183,18 @@ describe('wallet payloads against the real pod VTA', () => {
     expect((await alice.wallet.pod(SLUG))!.lastExplanation).toMatchObject({ tier: 'T1' });
     expect(r.session).toMatchObject({ subject: alice.persona.did, tier: 'T1' });
 
-    // A permission handed over later (here `pay:receive` for an enterprise Alice registered) re-opens the session
-    // at once, so the cookie carries it without waiting for a refused call (issue 6 of the MVP e2e report).
+    // A permission handed over later (here the root `pay:receive` VAC for an enterprise Alice registered, logged in
+    // `vac_issuance_log` as cc-gateway's merchant registration does) re-opens the session at once, so the cookie
+    // carries it without waiting for a refused call (issue 6 of the MVP e2e report).
     const enterprise = 'did:key:z6MkenterpriseForSessionRenewalTest';
-    const until = new Date(Date.now() + 30 * 86_400_000).toISOString();
-    const payVac = h.deps.podSigner.sign(
-      buildAuthority({ issuer: POD_DID, subject: alice.persona.did, scope: enterprise, actions: ['pay:receive'], validFrom: new Date().toISOString(), validUntil: until, tier: 'T1' }),
-    );
+    const payVac = await ownerPayVac(alice.persona.did, enterprise);
     expect(alice.jar.session!.authorities).not.toContain(`pay:receive@${enterprise}`);
     const added = await addPodCredential(alice.wallet, alice.client, payVac);
     expect(added.error).toBeUndefined();
     expect(added.session).toMatchObject({ subject: alice.persona.did, tier: 'T1' });
     expect(alice.jar.session!.authorities).toContain(`pay:receive@${enterprise}`);
-    // Refreshing the tier replaces only the pod-scoped tier permissions; the enterprise permission stays and the
-    // renewed session still carries it.
+    // Refreshing the tier: the refresh answer lists every valid logged VAC, so the enterprise permission stays and
+    // the renewed session still carries it.
     await refreshTier(alice.wallet, alice.client);
     expect(await alice.wallet.authorities(SLUG)).toContain('pay:receive');
     expect(alice.jar.session!.authorities).toContain(`pay:receive@${enterprise}`);
@@ -187,6 +228,36 @@ describe('wallet payloads against the real pod VTA', () => {
     await bob.ceremony.pollWitnessResult(ev, alice.persona.did);
     const bobGrant = await applyForMembership(bob.wallet, bob.client, alice.persona.did);
     expect(bobGrant.credentialSubject.id).toBe(bob.persona.did);
+  });
+
+  it('a revoked root pay:receive VAC is superseded at the next refresh and no longer reported', async () => {
+    const { alice } = await admittedMember();
+    const enterprise = 'did:key:z6MkenterpriseRevokedAtRefresh';
+    const payVac = await ownerPayVac(alice.persona.did, enterprise);
+    await addPodCredential(alice.wallet, alice.client, payVac);
+    await refreshTier(alice.wallet, alice.client);
+    expect(await alice.wallet.authorities(SLUG)).toContain('pay:receive');
+    // An attenuated staff VAC (authority.parent set) is never in the refresh answer; it must survive refreshes.
+    const staff = await alice.wallet.storeCredential(
+      h.deps.podSigner.sign(
+        buildAuthority({ issuer: POD_DID, subject: alice.persona.did, scope: enterprise, actions: ['pay:receive'], validUntil: new Date(Date.now() + 5 * 86_400_000).toISOString(), parent: digestMultibase(payVac), depth: 1 } as any),
+      ),
+      { pod: SLUG },
+    );
+
+    const steward: SessionClaims = { subject: 'did:key:z6MkStewardForRevocation', pod: POD_DID, tier: 'T3', authorities: ['pep:review'] };
+    const revoked = await h.callRoute(h.vta as any, 'POST', '/authority/revoke', { digest: digestMultibase(payVac), reason: 'Enterprise closed.' }, steward);
+    expect(revoked.status).toBe(200);
+
+    await refreshTier(alice.wallet, alice.client);
+    const row = (await alice.wallet.credentials(SLUG)).find((c) => c.digest === digestMultibase(payVac));
+    expect(row!.status).toBe('superseded');
+    expect((await alice.wallet.credentials(SLUG)).find((c) => c.digest === staff)!.status).not.toBe('superseded');
+    const rootVacs = (await alice.wallet.activeVacs(SLUG)).filter((v) => v.credentialSubject['authority'].scope === enterprise && !v.credentialSubject['authority'].parent);
+    expect(rootVacs).toEqual([]);
+    expect(alice.jar.session!.authorities).not.toContain(`pay:receive@${enterprise}`);
+    // The tier permissions are untouched.
+    expect(await alice.wallet.authorities(SLUG)).toEqual(expect.arrayContaining(tierDefaultActions('T1')));
   });
 
   it('refuses an application whose relationship halves do not match the witness credential', async () => {
