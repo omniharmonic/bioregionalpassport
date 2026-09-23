@@ -14,11 +14,21 @@ import { randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-const dbDist = new URL('../packages/db/dist/index.js', import.meta.url);
-const controlPlaneDist = new URL('../services/control-plane/dist/index.js', import.meta.url);
+const dist = (path) => new URL(`../${path}/dist/index.js`, import.meta.url);
 
-const { createTestDb } = await import(dbDist);
-const { tenantZeroJob, DEFAULT_PLATFORM_DOMAIN } = await import(controlPlaneDist);
+const { createTestDb } = await import(dist('packages/db'));
+const { tenantZeroJob, DEFAULT_PLATFORM_DOMAIN } = await import(dist('services/control-plane'));
+// The real smoke hooks: the VTA ceremony back half, a 1-credit ledger transfer and an AppView record round trip,
+// plus the demo-record seeder. Every one is required: the job runs with failOnSkipped, so a missing hook fails CI.
+const { ceremonyBackHalf } = await import(dist('services/pod-vta'));
+const { smokeTransfer } = await import(dist('services/cc-gateway'));
+const { smokeRecord, seedDemoRecords } = await import(dist('services/appview'));
+const deps = {
+  vta: { ceremonyBackHalf },
+  gateway: { smokeTransfer },
+  appview: { smokeRecord, seedRecords: seedDemoRecords },
+  seedRecords: seedDemoRecords,
+};
 
 const platformDomain = process.env.PLATFORM_DOMAIN || DEFAULT_PLATFORM_DOMAIN;
 // 64 hex chars = 32 bytes, the shape `POD_KEY_ENCRYPTION_KEY` requires (AES-256-GCM key).
@@ -29,7 +39,7 @@ console.log(`Tenant-zero job starting against an in-memory PGlite database (plat
 const db = await createTestDb();
 let report;
 try {
-  report = await tenantZeroJob(db, platformDomain, masterKey);
+  report = await tenantZeroJob(db, platformDomain, masterKey, deps, { failOnSkipped: true });
 } finally {
   await db.close();
 }
@@ -41,7 +51,7 @@ await writeFile(outPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
 console.log(`Report written to ${outPath}`);
 
 if (!report.ok) {
-  console.error('Tenant-zero verification failed: one or more checks did not pass.');
+  console.error('Tenant-zero verification failed: one or more checks did not pass (skipped checks count as failures here).');
   process.exit(1);
 }
 

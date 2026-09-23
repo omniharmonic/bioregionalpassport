@@ -8,7 +8,7 @@ import { didDocumentFor, getPod, loadPodSigner, type PodSigner } from './pods.js
 export interface VerifyCheck {
   name: string;
   ok: boolean;
-  /** True when an optional dependency was absent; skipped checks count as passing. */
+  /** True when an optional dependency was absent; skipped checks pass unless `failOnSkipped` is set. */
   skipped?: boolean;
   detail?: string;
 }
@@ -53,6 +53,11 @@ export interface VerifyInput {
   masterKey: string;
   deps?: VerifyDeps;
   now?: () => Date;
+  /**
+   * When true, a skipped check (missing hook or disabled module) fails the run. The CI tenant-zero job sets it so
+   * a hollow smoke cannot pass; the CLI `verify` keeps the default (false).
+   */
+  failOnSkipped?: boolean;
 }
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -157,6 +162,15 @@ export async function verifyPod(input: VerifyInput): Promise<VerifyReport> {
       ),
     );
     checks.push(await runOptional('appview-record', deps.appview, 'smokeRecord', ready, inPod));
+  }
+
+  if (input.failOnSkipped) {
+    for (const c of checks) {
+      if (c.skipped) {
+        c.ok = false;
+        c.detail = `skipped, and skips fail this run: ${c.detail ?? 'no detail'}`;
+      }
+    }
   }
 
   const finishedAt = now().toISOString();

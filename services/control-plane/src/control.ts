@@ -99,12 +99,18 @@ export interface TenantZeroReport {
   verify: VerifyReport;
 }
 
+export interface TenantZeroOptions {
+  /** A skipped smoke check fails the run (the CI job passes true). Default false. */
+  failOnSkipped?: boolean;
+}
+
 /** CI job: provision tenant zero (idempotent) and run the smoke; the verify run is recorded in `platform.tenant_zero_runs`. */
 export async function tenantZeroJob(
   db: Db,
   platformDomain: string,
   masterKey: string,
   deps?: VerifyDeps & ProvisionDeps,
+  opts: TenantZeroOptions = {},
 ): Promise<TenantZeroReport> {
   await migratePlatform(db);
   const provision = await provisionPod({
@@ -120,6 +126,7 @@ export async function tenantZeroJob(
     platformDomain,
     masterKey,
     ...(deps ? { deps: { vta: deps.vta, gateway: deps.gateway, appview: deps.appview } } : {}),
+    ...(opts.failOnSkipped ? { failOnSkipped: true } : {}),
   });
   return { ok: verify.ok, provision, verify };
 }

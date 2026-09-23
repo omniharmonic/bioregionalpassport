@@ -27,4 +27,4 @@ export {
 export { verifyPod, type VerifyInput, type VerifyReport, type VerifyCheck, type VerifyDeps, type SmokeHelpers } from './verify.js';
 export { exportPod, type PodExport } from './export.js';
 export { createRegistryRoutes, authorize, registryEntries, POD_ISSUER_AUTHORITIES, type RegistryEntry } from './registry.js';
-export { createControlRoutes, tenantZeroJob, type ControlRouteOptions, type TenantZeroReport } from './control.js';
+export { createControlRoutes, tenantZeroJob, type ControlRouteOptions, type TenantZeroOptions, type TenantZeroReport } from './control.js';

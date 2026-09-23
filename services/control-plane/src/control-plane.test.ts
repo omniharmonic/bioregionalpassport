@@ -247,6 +247,28 @@ describe('tenantZeroJob', () => {
     expect(again.provision.steps.every((s) => s.status === 'unchanged')).toBe(true);
     expect(await db.query('select * from platform.tenant_zero_runs')).toHaveLength(2);
   });
+
+  it('with failOnSkipped, a missing smoke hook fails the run instead of passing as skipped', async () => {
+    const hollow = await tenantZeroJob(db, DOMAIN, MASTER, undefined, { failOnSkipped: true });
+    expect(hollow.ok).toBe(false);
+    const skipped = hollow.verify.checks.filter((c) => c.skipped);
+    expect(skipped.map((c) => c.name).sort()).toEqual(['appview-record', 'ledger-transfer', 'vta-ceremony']);
+    expect(skipped.every((c) => !c.ok && /skips fail this run/.test(c.detail ?? ''))).toBe(true);
+
+    const hooked = await tenantZeroJob(
+      db,
+      DOMAIN,
+      MASTER,
+      {
+        vta: { ceremonyBackHalf: async () => ({ ok: true }) },
+        gateway: { smokeTransfer: async () => ({ ok: true }) },
+        appview: { smokeRecord: async () => ({ ok: true }) },
+      },
+      { failOnSkipped: true },
+    );
+    expect(hooked.ok).toBe(true);
+    expect(hooked.verify.skipped).toBe(0);
+  });
 });
 
 describe('fix round 1', () => {
