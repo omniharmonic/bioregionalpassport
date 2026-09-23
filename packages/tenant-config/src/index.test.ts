@@ -25,6 +25,10 @@ describe('ManifestSchema', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('turns on every demo module for tenant-zero, including Merchant Mode', () => {
+    expect(tenantZeroManifest.modules).toMatchObject({ map: true, grants: true, circulation: true, merchant: true });
+  });
+
   it('parses both manifests directly with ManifestSchema', () => {
     expect(() => ManifestSchema.parse(boulderManifest)).not.toThrow();
     expect(() => ManifestSchema.parse(tenantZeroManifest)).not.toThrow();

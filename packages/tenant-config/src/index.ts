@@ -434,7 +434,7 @@ export const tenantZeroManifest: BioregionManifest = {
     map: true,
     grants: true,
     circulation: true,
-    merchant: false,
+    merchant: true,
     thirdParty: [],
   },
   trustPolicy: `https://tenant-zero.${PLATFORM_DOMAIN}/api/vta/policy`,
