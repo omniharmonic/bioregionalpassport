@@ -14,6 +14,8 @@ function member(did: string, over: Partial<MemberAggregate> = {}): MemberAggrega
     witnessedEdges: 0,
     distinctEvents: 0,
     distinctConveners: 0,
+    meetings: 0,
+    distinctWitnesses: 0,
     endorsements: [],
     ...over,
   };
@@ -38,6 +40,10 @@ describe('score formula (FR-TR-1)', () => {
     expect(spreadFactor(0, 0)).toBe(0.5); // clipped low
     expect(spreadFactor(1, 4)).toBe(0.5); // 0.25 → 0.5
     expect(spreadFactor(3, 3)).toBe(1);
+    // two different witnesses are as spread as two events; meetings by one witness are one source
+    expect(spreadFactor(0, 3, 2)).toBeCloseTo(2 / 3, 10);
+    expect(spreadFactor(0, 3, 1)).toBe(0.5);
+    expect(spreadFactor(2, 4, 3)).toBeCloseTo(0.75, 10);
     expect(hopFactor(0, 0.6, false)).toBe(1);
     expect(hopFactor(2, 0.6, false)).toBeCloseTo(0.36, 10);
     expect(hopFactor(null, 0.6, false)).toBe(0);

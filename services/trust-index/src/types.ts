@@ -32,8 +32,13 @@ export interface MemberAggregate {
   recordedTier: Tier | null;
   /** Distinct witness references across the member's witnessed postings. */
   witnessedEdges: number;
+  /** Distinct gatherings (`events.kind = 'event'`) among the witnessed edges; meetings do not count. */
   distinctEvents: number;
   distinctConveners: number;
+  /** Distinct ad-hoc meeting tasks (`events.kind = 'meeting'`, peer witnessing) among the witnessed edges. */
+  meetings: number;
+  /** Distinct witnesses (`witness_refs.convener_did`) across all witnessed edges, at events or meetings. */
+  distinctWitnesses: number;
   endorsements: Endorsement[];
 }
 
@@ -55,15 +60,23 @@ export interface MemberMetrics {
   membership: MembershipStatus;
   recordedTier: Tier | null;
   witnessedEdges: number;
+  /** Distinct gatherings (`events.kind = 'event'`); peer-witnessing meetings are not events. */
   distinctEvents: number;
   distinctConveners: number;
+  /** Distinct peer-witnessing meetings. */
+  meetings: number;
+  /** Distinct witnesses across events and meetings. */
+  distinctWitnesses: number;
   endorsements: number;
   weightedEndorsements: number;
   /** E = Σ scopeWeight × 0.5^(age / half-life). */
   endorsementSum: number;
   /** `null` = not reachable from the seed set (∞). 0 when the seed set is empty (hop decay disabled). */
   seedHops: number | null;
-  /** distinctEvents / max(witnessedEdges, 1), clipped to [0.5, 1]. */
+  /**
+   * R = max(distinctEvents, distinctWitnesses) / max(witnessedEdges, 1), clipped to [0.5, 1]. A member
+   * witnessed by two different people is as spread as one witnessed at two events.
+   */
   spread: number;
   /** D = hopDecay^seedHops. */
   hopFactor: number;

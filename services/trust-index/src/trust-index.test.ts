@@ -60,6 +60,8 @@ interface Pod {
   post(poster: string, commitments: unknown[], now?: Date): Promise<void>;
   /** `to` opts in a VEC from `from` (a T2+ member) ⇒ weighted endorsement + link from → to. */
   endorse(from: KeyPair, to: string, scope?: 'lives-here' | 'worked-with' | 'knows'): Promise<void>;
+  /** An `events` row of the given kind (`'event'` gathering or `'meeting'` peer-witnessing task). */
+  task(id: string, kind: 'event' | 'meeting'): Promise<void>;
 }
 
 async function newPod(): Promise<Pod> {
@@ -98,6 +100,10 @@ async function newPod(): Promise<Pod> {
     },
     endorse: (from, to, scope = 'knows') =>
       pod.post(to, [{ commitment: `endorse-${slug}-${++seq}-commitment`, scope, evidence: { vec: vec(from, to, scope) } }]),
+    task: (id, kind) =>
+      withPod(db, slug, async (tx) => {
+        await tx.query('INSERT INTO events (id, title, kind, attestation) VALUES ($1, $2, $3, true)', [id, `Task ${id}`, kind]);
+      }),
   };
   return pod;
 }
@@ -150,7 +156,9 @@ describe('trust index on PGlite', () => {
     expect(rec.explanation).toContain(
       '1 of 3 witnessed edges — get two more relationships witnessed by a convener at an attestation event.',
     );
-    expect(rec.explanation).toContain('1 of 2 distinct events — attend one more attestation event.');
+    expect(rec.explanation).toContain(
+      '1 of 2 different witnesses or gatherings — ask another neighbor to witness a relationship.',
+    );
     expect(rec.next?.tier).toBe('T2');
     expect(rec.next?.missing).toEqual(['witnessedEdges>=3', 'distinctEvents>=2', 'weightedEndorsements>=2', 'seedHops<=3']);
   });
@@ -173,10 +181,11 @@ describe('trust index on PGlite', () => {
     expect(rec.explanation).toEqual(
       expect.arrayContaining([
         '3 of 3 witnessed edges.',
-        '2 of 2 distinct events.',
+        // default policy `distinctEvents>=2` is evaluated as `distinctEventsOrWitnesses>=2` (peer witnessing on)
+        '2 of 2 different witnesses or gatherings.',
         '2 of 2 weighted endorsements.',
         '3 hops from the seed set (3 or fewer needed).',
-        'Spread across events is 0.67 (>= 0.5 needed).',
+        'Spread across different witnesses and events is 0.67 (>= 0.5 needed).',
       ]),
     );
     expect(rec.next).toMatchObject({ tier: 'T3', missing: ['electedByGovernance', 'T2for>=180d'] });
@@ -588,5 +597,179 @@ describe('routes', () => {
     const recomputed = await pod.run((ctx) => route('POST', '/recompute').handler(ctx, req()));
     expect(recomputed.body.counts.T1).toBe(1);
     expect(JSON.parse(JSON.stringify(recomputed.body)).total).toBe(1);
+  });
+});
+
+describe('peer witnessing (meetings, Task 21b)', () => {
+  /**
+   * Member with 2 weighted endorsements (from T2 members E1, E2) at 3 hops from the seed and 3 witnessed edges,
+   * one per entry of `witnesses`: `[taskId, kind, witnessDid]`.
+   */
+  async function peerScenario(witnesses: readonly [string, 'event' | 'meeting', string][]): Promise<{ pod: Pod; m: string }> {
+    const pod = await newPod();
+    const m = persona('peer-member').did;
+    await pod.member(SEED, 'T4');
+    await pod.member(m, 'T1');
+    await pod.member(E1.did, 'T2');
+    await pod.member(E2.did, 'T2');
+    const tasks = new Set<string>();
+    const commitments: unknown[] = [];
+    for (const [i, [taskId, kind, witness]] of witnesses.entries()) {
+      if (!tasks.has(taskId)) {
+        await pod.task(taskId, kind);
+        tasks.add(taskId);
+      }
+      await pod.witness(`pw${i}`, taskId, witness, [m, `did:key:zPeer${i}`]);
+      commitments.push({ commitment: `peer-commit-${i}-aaaaaaa`, scope: 'relationship', witnessRef: `pw${i}` });
+    }
+    await pod.post(m, commitments);
+    await pod.endorse(E1, m, 'lives-here');
+    await pod.endorse(E2, m, 'knows');
+    const hop = persona('peer-hop-1');
+    await pod.member(hop.did, 'T2');
+    await pod.endorse(SEED_KEY, hop.did);
+    await pod.endorse(hop, E2.did);
+    return { pod, m };
+  }
+
+  it('3 edges at 3 meetings by the same witness: distinctEvents 0, distinctWitnesses 1, spread 0.5, not T2', async () => {
+    const W = 'did:key:zSameWitness';
+    const { pod, m } = await peerScenario([
+      ['meet-1', 'meeting', W],
+      ['meet-2', 'meeting', W],
+      ['meet-3', 'meeting', W],
+    ]);
+    const rec = await pod.run((ctx) => recommendTier(ctx, m));
+    expect(rec.metrics).toMatchObject({
+      witnessedEdges: 3,
+      distinctEvents: 0,
+      meetings: 3,
+      distinctWitnesses: 1,
+      weightedEndorsements: 2,
+      seedHops: 3,
+      spread: 0.5,
+    });
+    expect(rec.tier).toBe('T1');
+    expect(rec.next).toMatchObject({ tier: 'T2', missing: ['distinctEvents>=2'] });
+    expect(rec.next?.hints).toEqual(['1 of 2 different witnesses or gatherings — ask another neighbor to witness a relationship.']);
+    // D = 0.6^3; E = 1.5 → 0.75; R = 0.5
+    expect(rec.score).toBeCloseTo(0.216 * 3.75 * 0.5, 10);
+  });
+
+  it('two different witnesses across meetings meet distinctEventsOrWitnesses>=2 → T2', async () => {
+    const { pod, m } = await peerScenario([
+      ['meet-a', 'meeting', 'did:key:zWitnessA'],
+      ['meet-b', 'meeting', 'did:key:zWitnessB'],
+      ['meet-c', 'meeting', 'did:key:zWitnessA'],
+    ]);
+    const rec = await pod.run((ctx) => recommendTier(ctx, m));
+    expect(rec.metrics).toMatchObject({ distinctEvents: 0, meetings: 3, distinctWitnesses: 2 });
+    expect(rec.metrics.spread).toBeCloseTo(2 / 3, 10);
+    expect(rec.tier).toBe('T2');
+    expect(rec.explanation).toContain('2 of 2 different witnesses or gatherings.');
+  });
+
+  it('explicit distinctWitnesses / distinctEventsOrWitnesses requirements', async () => {
+    const { pod, m } = await peerScenario([
+      ['meet-a', 'meeting', 'did:key:zWitnessA'],
+      ['meet-b', 'meeting', 'did:key:zWitnessB'],
+      ['event-x', 'event', 'did:key:zWitnessA'],
+    ]);
+    pod.policy.tiers.T2.requires = ['distinctWitnesses>=2', 'distinctEventsOrWitnesses>=3'];
+    const rec = await pod.run((ctx) => recommendTier(ctx, m));
+    expect(rec.metrics).toMatchObject({ distinctEvents: 1, meetings: 2, distinctWitnesses: 2 });
+    expect(rec.tier).toBe('T1');
+    expect(rec.explanation).toContain('2 of 2 different witnesses.');
+    expect(rec.next?.hints).toEqual(['2 of 3 different witnesses or gatherings — ask another neighbor to witness a relationship.']);
+  });
+
+  it('with admission.peerWitnessing false, distinctEvents>=2 is strict: meetings do not pass, two real events do', async () => {
+    const strict = (pod: Pod) => {
+      (pod.policy as unknown as { admission: { peerWitnessing: boolean } }).admission = { peerWitnessing: false };
+    };
+    const peers = await peerScenario([
+      ['meet-a', 'meeting', 'did:key:zWitnessA'],
+      ['meet-b', 'meeting', 'did:key:zWitnessB'],
+      ['meet-c', 'meeting', 'did:key:zWitnessA'],
+    ]);
+    strict(peers.pod);
+    const noEvents = await peers.pod.run((ctx) => recommendTier(ctx, peers.m));
+    expect(noEvents.tier).toBe('T1');
+    expect(noEvents.next?.hints).toEqual(['0 of 2 distinct events — attend two more attestation events.']);
+
+    const events = await peerScenario([
+      ['event-1', 'event', 'did:key:zConvener'],
+      ['event-2', 'event', 'did:key:zConvener'],
+      ['event-2', 'event', 'did:key:zConvener'],
+    ]);
+    strict(events.pod);
+    const rec = await events.pod.run((ctx) => recommendTier(ctx, events.m));
+    expect(rec.metrics).toMatchObject({ distinctEvents: 2, meetings: 0, distinctWitnesses: 1 });
+    expect(rec.tier).toBe('T2');
+    expect(rec.explanation).toContain('2 of 2 distinct events.');
+  });
+
+  /** A witnessed pair recorded at `at` (meeting unless `eventId` names a gathering), admitting `usedBy`. */
+  async function pair(
+    pod: Pod,
+    digest: string,
+    witness: string,
+    parties: readonly string[],
+    at: Date,
+    usedBy: readonly string[] = [],
+  ): Promise<void> {
+    await pod.task(`meet-${digest}`, 'meeting');
+    await pod.witness(digest, `meet-${digest}`, witness, parties);
+    await pod.run((ctx) =>
+      ctx.db.query('UPDATE witness_refs SET created_at = $2, used_by = $3 WHERE digest = $1', [digest, at, JSON.stringify(usedBy)]),
+    );
+  }
+
+  it('witness-volume flag fires at 21 pairs in 7 days (default 20/week), not at 20; older pairs do not count', async () => {
+    const pod = await newPod();
+    const busy = 'did:key:zBusyWitness';
+    const steady = 'did:key:zSteadyWitness';
+    const dayAgo = new Date(NOW.getTime() - 86_400_000);
+    for (let i = 0; i < 21; i++) await pair(pod, `busy-${i}`, busy, [`did:key:zB${i}a`, `did:key:zB${i}b`], dayAgo);
+    for (let i = 0; i < 20; i++) await pair(pod, `steady-${i}`, steady, [`did:key:zS${i}a`, `did:key:zS${i}b`], dayAgo);
+    for (let i = 0; i < 5; i++) {
+      await pair(pod, `steady-old-${i}`, steady, [`did:key:zO${i}a`, `did:key:zO${i}b`], new Date(NOW.getTime() - 8 * 86_400_000));
+    }
+    const flags = await pod.run((ctx) => stewardFlags(ctx));
+    expect(flags).toEqual([
+      {
+        did: busy,
+        kind: 'witness-volume',
+        detail: '21 relationships witnessed in the last 7 days (21 at meetings, 0 at events); the pod policy expects at most 20 per week.',
+        since: dayAgo.toISOString(),
+      },
+    ]);
+    // the limit is policy (anomaly.witnessPairsPerWeek); flags never change tiers or memberships
+    (pod.policy.anomaly as { witnessPairsPerWeek?: number }).witnessPairsPerWeek = 25;
+    expect(await pod.run((ctx) => stewardFlags(ctx))).toEqual([]);
+  });
+
+  it('hub flag: 5 admits witnessed by no one else; not at 4, not when one admit has another witness', async () => {
+    const pod = await newPod();
+    const hub = 'did:key:zHubWitness';
+    const four = 'did:key:zFourWitness';
+    const mixed = 'did:key:zMixedWitness';
+    const at = new Date(NOW.getTime() - 30 * 86_400_000);
+    for (let i = 0; i < 5; i++) await pair(pod, `hub-${i}`, hub, [`did:key:zH${i}`, `did:key:zHs${i}`], at, [`did:key:zH${i}`]);
+    for (let i = 0; i < 4; i++) await pair(pod, `four-${i}`, four, [`did:key:zF${i}`, `did:key:zFs${i}`], at, [`did:key:zF${i}`]);
+    for (let i = 0; i < 5; i++) await pair(pod, `mixed-${i}`, mixed, [`did:key:zM${i}`, `did:key:zMs${i}`], at, [`did:key:zM${i}`]);
+    // one of the mixed witness's admits later has a relationship witnessed by someone else
+    await pair(pod, 'mixed-other', 'did:key:zOtherWitness', ['did:key:zM0', 'did:key:zNeighbor'], at);
+
+    const flags = await pod.run((ctx) => stewardFlags(ctx));
+    expect(flags).toEqual([
+      {
+        did: hub,
+        kind: 'witness-volume',
+        detail: "All 5 members admitted with this witness's credentials have been witnessed by no one else.",
+        since: at.toISOString(),
+      },
+    ]);
+    expect(await pod.run((ctx) => ctx.db.query('SELECT count(*)::int AS n FROM members'))).toEqual([{ n: 0 }]);
   });
 });

@@ -1,6 +1,6 @@
 import type { TrustPolicy } from '@passport/tenant-config';
 import { ENDORSEMENT_SCOPES, TIERS, type Tier } from '@passport/vocab';
-import { evaluateRequirement, membershipSentence } from './requirements.js';
+import { effectiveRequirement, evaluateRequirement, membershipSentence } from './requirements.js';
 import type {
   Endorsement,
   MemberAggregate,
@@ -57,9 +57,16 @@ export function endorsementSum(endorsements: readonly Endorsement[], policy: Tru
   return sum;
 }
 
-/** spread = distinctEvents / max(witnessedEdges, 1), clipped to [0.5, 1]. */
-export function spreadFactor(distinctEvents: number, witnessedEdges: number): number {
-  const raw = distinctEvents / Math.max(witnessedEdges, 1);
+/**
+ * R = max(distinctEvents, distinctWitnesses) / max(witnessedEdges, 1), clipped to [0.5, 1].
+ *
+ * Spread measures how many independent sources vouch for a member's witnessed edges. A member witnessed by
+ * two different people is as spread as one witnessed at two events: peer witnessing (Task 21) needs no event,
+ * and every peer-witnessed pair gets its own meeting task, so meetings never count as events — distinct
+ * witnesses do. Three edges witnessed by the same peer at three meetings are one source (R = 0.5).
+ */
+export function spreadFactor(distinctEvents: number, witnessedEdges: number, distinctWitnesses = 0): number {
+  const raw = Math.max(distinctEvents, distinctWitnesses) / Math.max(witnessedEdges, 1);
   return Math.min(1, Math.max(0.5, raw));
 }
 
@@ -96,11 +103,13 @@ export function metricsFor(
     witnessedEdges: member.witnessedEdges,
     distinctEvents: member.distinctEvents,
     distinctConveners: member.distinctConveners,
+    meetings: member.meetings,
+    distinctWitnesses: member.distinctWitnesses,
     endorsements: member.endorsements.length,
     weightedEndorsements: member.endorsements.filter((e) => e.weighted).length,
     endorsementSum: endorsementSum(member.endorsements, policy),
     seedHops,
-    spread: spreadFactor(member.distinctEvents, member.witnessedEdges),
+    spread: spreadFactor(member.distinctEvents, member.witnessedEdges, member.distinctWitnesses),
     hopFactor: hopFactor(seedHops, policy.weights.hopDecay, seedSetEmpty),
   };
 }
@@ -122,7 +131,9 @@ export function recommend(member: MemberAggregate, metrics: MemberMetrics, polic
     const results = requires.map((requirement) => ({
       tier: t,
       requirement,
-      ...evaluateRequirement(requirement, { tier: t, metrics, seedSetEmpty }),
+      // `requirement` stays the policy's own text (it names the policy entry in `next.missing`); the evaluated
+      // form may differ under the peer-witnessing compatibility rule (see `effectiveRequirement`).
+      ...evaluateRequirement(effectiveRequirement(t, requirement, policy), { tier: t, metrics, seedSetEmpty }),
     }));
     perTier.set(t, results);
     if (results.every((r) => r.met) && metrics.vmcPairComplete) tier = t;

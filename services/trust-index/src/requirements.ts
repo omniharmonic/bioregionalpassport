@@ -1,3 +1,4 @@
+import type { TrustPolicy } from '@passport/tenant-config';
 import { isAtLeast, type Tier } from '@passport/vocab';
 import type { MemberMetrics } from './types.js';
 
@@ -43,6 +44,43 @@ function compare(actual: number, op: ComparisonOp, value: number): boolean {
     case '=':
       return actual === value;
   }
+}
+
+/**
+ * Policy fields this index reads before the policy schema declares them (Task 21b; the schema task makes them
+ * explicit). Read defensively: an older policy without them gets the defaults.
+ *   admission.peerWitnessing      boolean, default true  — see `effectiveRequirement`
+ *   anomaly.witnessPairsPerWeek   number,  default 20    — see flags.ts `witness-volume`
+ */
+interface PeerWitnessingPolicyFields {
+  admission?: { peerWitnessing?: boolean };
+  anomaly?: { witnessPairsPerWeek?: number };
+}
+
+/** `policy.admission?.peerWitnessing !== false` (default true). */
+export function peerWitnessingEnabled(policy: TrustPolicy): boolean {
+  return (policy as unknown as PeerWitnessingPolicyFields).admission?.peerWitnessing !== false;
+}
+
+/** `policy.anomaly?.witnessPairsPerWeek ?? 20`. */
+export const DEFAULT_WITNESS_PAIRS_PER_WEEK = 20;
+export function witnessPairsPerWeek(policy: TrustPolicy): number {
+  const v = (policy as unknown as PeerWitnessingPolicyFields).anomaly?.witnessPairsPerWeek;
+  return typeof v === 'number' && Number.isFinite(v) ? v : DEFAULT_WITNESS_PAIRS_PER_WEEK;
+}
+
+/**
+ * Compatibility rule (Task 21b): when peer witnessing is on (`admission.peerWitnessing !== false`, the default),
+ * a T2 requirement `distinctEvents>=N` is evaluated as `distinctEventsOrWitnesses>=N` — N different witnesses
+ * or gatherings, whichever is larger. Existing pods get peer-to-peer spread without editing their policy;
+ * events stay an optional, stronger signal. With `peerWitnessing: false`, or on any other tier or operator,
+ * the requirement is evaluated exactly as written. The schema task will make this explicit in the policy.
+ */
+export function effectiveRequirement(tier: Tier, raw: string, policy: TrustPolicy): string {
+  if (tier !== 'T2' || !peerWitnessingEnabled(policy)) return raw;
+  const req = parseTierRequirement(raw);
+  if (req.kind !== 'compare' || req.metric !== 'distinctEvents' || req.op !== '>=' || req.unit) return raw;
+  return `distinctEventsOrWitnesses>=${req.value}`;
 }
 
 /**
@@ -111,6 +149,17 @@ export function evaluateRequirement(raw: string, input: EvaluateInput): { met: b
       return countSentence(m.distinctEvents, op, value, 'distinct event', 'distinct events', (short) =>
         `attend ${word(short)} more attestation ${plural(short, 'event', 'events')}`,
       );
+    case 'distinctWitnesses':
+      return countSentence(m.distinctWitnesses, op, value, 'different witness', 'different witnesses', askWitness);
+    case 'distinctEventsOrWitnesses':
+      return countSentence(
+        Math.max(m.distinctEvents, m.distinctWitnesses),
+        op,
+        value,
+        'different witness or gathering',
+        'different witnesses or gatherings',
+        askWitness,
+      );
     case 'distinctConveners':
       return countSentence(m.distinctConveners, op, value, 'distinct convener', 'distinct conveners', (short) =>
         `have ${word(short)} more ${plural(short, 'relationship', 'relationships')} witnessed by a different convener`,
@@ -146,8 +195,10 @@ export function evaluateRequirement(raw: string, input: EvaluateInput): { met: b
     }
     case 'spread': {
       const met = compare(m.spread, op, value);
-      const base = `Spread across events is ${fmt(m.spread)} (${op} ${fmt(value)} needed)`;
-      return met ? { met, sentence: `${base}.` } : { met, sentence: `${base} — have relationships witnessed at different events.` };
+      const base = `Spread across different witnesses and events is ${fmt(m.spread)} (${op} ${fmt(value)} needed)`;
+      return met
+        ? { met, sentence: `${base}.` }
+        : { met, sentence: `${base} — have relationships witnessed by different neighbors or at different events.` };
     }
     case 'score':
       return {
@@ -157,6 +208,12 @@ export function evaluateRequirement(raw: string, input: EvaluateInput): { met: b
     default:
       return { met: false, sentence: `The policy metric "${metric}" is not something the index knows how to check, so it cannot be met.` };
   }
+}
+
+function askWitness(short: number): string {
+  return short === 1
+    ? 'ask another neighbor to witness a relationship'
+    : `ask ${word(short)} more neighbors to each witness a relationship`;
 }
 
 /** Plain sentence for an incomplete membership pair. */

@@ -26,12 +26,21 @@ export {
   recommend,
   isEndorsementScope,
 } from './scorer.js';
-export { parseTierRequirement, evaluateRequirement, isGovernanceMetric, membershipSentence } from './requirements.js';
+export {
+  parseTierRequirement,
+  evaluateRequirement,
+  effectiveRequirement,
+  isGovernanceMetric,
+  membershipSentence,
+  peerWitnessingEnabled,
+  witnessPairsPerWeek,
+  DEFAULT_WITNESS_PAIRS_PER_WEEK,
+} from './requirements.js';
 export type { ParsedRequirement, ComparisonOp } from './requirements.js';
 export { CommitBodySchema, COMMIT_SCOPES, MAX_WITNESS_CLAIMANTS, commitEdges, markWeighted } from './commit.js';
 export type { CommitBody, CommitDeps, CommitResult, CommitItemResult } from './commit.js';
-export { computeFlags, stewardFlags } from './flags.js';
-export type { AnomalyFlag, AnomalyKind } from './flags.js';
+export { computeFlags, stewardFlags, witnessVolumeFlags, loadWitnessRows, WITNESS_HUB_MIN_ADMITTED } from './flags.js';
+export type { AnomalyFlag, AnomalyKind, WitnessRow } from './flags.js';
 export { loadGraph } from './graph.js';
 export { ensureIndexTables } from './schema.js';
 export { recommendTier, recomputeAll, createTrustIndexRoutes, createTrustIndexHandlers } from './service.js';

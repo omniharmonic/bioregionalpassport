@@ -17,15 +17,27 @@ export interface PostingRow {
   witness_ref: string | null;
   event_id: string | null;
   convener_did: string | null;
+  /**
+   * `events.kind` of the witness reference's task: `'event'` (a scheduled gathering) or `'meeting'` (an ad-hoc
+   * peer-witnessing Trust Task created by pod-vta `POST /witness`, Task 21a). `null` when the task row is absent
+   * (pre-0011 refs, refs whose task was never stored): counted as an event, as before meetings existed.
+   */
+  event_kind: string | null;
+}
+
+/** True when the witness reference was made at an ad-hoc meeting rather than at a gathering. */
+export function isMeeting(row: Pick<PostingRow, 'event_kind'>): boolean {
+  return row.event_kind === 'meeting';
 }
 
 export async function loadPostings(ctx: IndexContext): Promise<PostingRow[]> {
   return ctx.db.query<PostingRow>(
     `SELECT p.poster_did, c.commitment, c.scope, p.witnessed, p.weighted, p.created_at,
-            p.endorser_did, c.witness_ref, w.event_id, w.convener_did
+            p.endorser_did, c.witness_ref, w.event_id, w.convener_did, e.kind AS event_kind
        FROM index_postings p
        JOIN edge_commitments c ON c.commitment = p.commitment
        LEFT JOIN witness_refs w ON w.digest = c.witness_ref
+       LEFT JOIN events e ON e.id = w.event_id
       WHERE c.revoked_at IS NULL
       ORDER BY p.created_at, c.commitment`,
   );
@@ -49,7 +61,7 @@ export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph;
   const now = ctx.now().getTime();
 
   const members = new Map<string, MemberAggregate>();
-  const witnessSets = new Map<string, { refs: Set<string>; events: Set<string>; conveners: Set<string> }>();
+  const witnessSets = new Map<string, { refs: Set<string>; events: Set<string>; meetings: Set<string>; conveners: Set<string> }>();
   const ensure = (did: string): MemberAggregate => {
     let m = members.get(did);
     if (!m) {
@@ -61,10 +73,12 @@ export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph;
         witnessedEdges: 0,
         distinctEvents: 0,
         distinctConveners: 0,
+        meetings: 0,
+        distinctWitnesses: 0,
         endorsements: [],
       };
       members.set(did, m);
-      witnessSets.set(did, { refs: new Set(), events: new Set(), conveners: new Set() });
+      witnessSets.set(did, { refs: new Set(), events: new Set(), meetings: new Set(), conveners: new Set() });
     }
     return m;
   };
@@ -90,7 +104,9 @@ export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph;
     if (p.witnessed && p.witness_ref) {
       const sets = witnessSets.get(p.poster_did)!;
       sets.refs.add(p.witness_ref);
-      if (p.event_id) sets.events.add(p.event_id);
+      // Meetings are not events for spread: every peer-witnessed pair gets its own meeting task, so counting
+      // them as events would make any member look spread across as many "events" as they have edges.
+      if (p.event_id) (isMeeting(p) ? sets.meetings : sets.events).add(p.event_id);
       if (p.convener_did) sets.conveners.add(p.convener_did);
     } else if (isEndorsementScope(p.scope)) {
       const endorsement: Endorsement = {
@@ -113,6 +129,10 @@ export async function loadGraph(ctx: IndexContext): Promise<{ graph: TrustGraph;
     m.witnessedEdges = sets.refs.size;
     m.distinctEvents = sets.events.size;
     m.distinctConveners = sets.conveners.size;
+    m.meetings = sets.meetings.size;
+    // The witness of a pair is the convener recorded on its witness ref (the event convener, or the peer who
+    // witnessed a meeting), so today this is the same set as `distinctConveners`, across events and meetings.
+    m.distinctWitnesses = sets.conveners.size;
   }
 
   const links = new Map<string, Set<string>>();

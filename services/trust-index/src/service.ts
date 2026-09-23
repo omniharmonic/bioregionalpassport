@@ -23,6 +23,8 @@ function emptyAggregate(did: string): MemberAggregate {
     witnessedEdges: 0,
     distinctEvents: 0,
     distinctConveners: 0,
+    meetings: 0,
+    distinctWitnesses: 0,
     endorsements: [],
   };
 }
