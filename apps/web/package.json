@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "vitest run && vitest run --root 'app/p/[slug]/circulation/_lib'"
+    "test": "vitest run && vitest run --root 'app/p/[slug]/circulation/_lib' && vitest run --root 'app/operator'"
   },
   "dependencies": {
     "@passport/appview": "workspace:*",
@@ -17,6 +17,8 @@
     "@passport/control-plane": "workspace:*",
     "@passport/credential-core": "workspace:*",
     "@passport/db": "workspace:*",
+    "@passport/lexicons": "workspace:*",
+    "@passport/pod-client": "workspace:*",
     "@passport/pod-vta": "workspace:*",
     "@passport/pos-adapter": "workspace:*",
     "@passport/round": "workspace:*",
@@ -27,6 +29,7 @@
     "@passport/verifier-sdk": "workspace:*",
     "@passport/vocab": "workspace:*",
     "dexie": "^4.4.6",
+    "html5-qrcode": "^2.3.8",
     "next": "^16.3.6",
     "postgres": "^3.4.9",
     "react": "^19.3.0",
